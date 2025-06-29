@@ -4,30 +4,19 @@ import matplotlib.pyplot as plt
 import json
 import networkx as nx
 
-def build_grid_graph(path_grid, limit):
-    with open(path_grid) as f:
-        grid = json.load(f)
+def build_grid_graph(file):
 
-    buses = list(grid["Buses"].keys())
+    buses = list(file["Buses"].keys())
     bus_idx = {b: i for i, b in enumerate(buses)}
 
     G = nx.Graph()
-    edges_order = []
-    edge_attr_list = []
 
-    for lid, line in grid["Transmission lines"].items():
+    for lid, line in file["Transmission lines"].items():
         u = bus_idx[line["Source bus"]]
         v = bus_idx[line["Target bus"]]
         G.add_edge(u, v)
-        edges_order.append((u, v))
-        edge_attr_list.append([
-            line["Reactance (ohms)"],
-            line["Susceptance (S)"],
-            limit
-        ])
 
-    edge_attr_static = np.asarray(edge_attr_list)
-    return G, bus_idx, edges_order, edge_attr_static
+    return G, bus_idx
 
 
 def plot_grid_graph(G, bus_idx, seed = 42):
