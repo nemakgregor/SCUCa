@@ -9,7 +9,7 @@ This repository provides examples for solving the **Security Constrained Unit Co
 - `ml/src/` &ndash; small Python package with graph utilities and an `EdgeModel` used by the notebook.
 - `instances/` &ndash; sample instances in MATPOWER format.
 
-For a detailed overview of the SCUC formulation, see [this reference](https://arxiv.org/pdf/1706.02216).
+For a detailed overview of the GNN formulation, see [this reference](https://arxiv.org/pdf/1706.02216).
 
 ## Usage
 
