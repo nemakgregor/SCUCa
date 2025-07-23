@@ -1,0 +1,10 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Downloaded datasets
+src/data/input/
+instances/**/gurobi_cases.zip
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
