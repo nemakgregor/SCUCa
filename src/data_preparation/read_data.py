@@ -10,9 +10,9 @@ from src.data_preparation.data_structure import (
     UnitCommitmentScenario,
 )
 from src.data_preparation.utils import (
-    _from_json,
-    _repair_scenario_names_and_probabilities,
-    _migrate,
+    from_json,
+    repair_scenario_names_and_probabilities,
+    migrate,
 )
 
 
@@ -49,7 +49,7 @@ def _read(path_or_paths: Union[str, Sequence[str]]) -> UnitCommitmentInstance:
     """
     if isinstance(path_or_paths, (list, tuple)):
         scenarios = [_read_scenario(p) for p in path_or_paths if isinstance(p, str)]
-        _repair_scenario_names_and_probabilities(scenarios, list(path_or_paths))
+        repair_scenario_names_and_probabilities(scenarios, list(path_or_paths))
     else:
         scenarios = [_read_scenario(path_or_paths)]
         scenarios[0].name = "s1"
@@ -60,8 +60,8 @@ def _read(path_or_paths: Union[str, Sequence[str]]) -> UnitCommitmentInstance:
 
 def _read_scenario(path: str) -> UnitCommitmentScenario:
     raw = _read_json(path)
-    _migrate(raw)
-    return _from_json(raw)
+    migrate(raw)
+    return from_json(raw)
 
 
 def _read_json(path: str) -> dict:

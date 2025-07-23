@@ -1,4 +1,4 @@
-from model_bilder import build_model
+from optimization_model.SCUC.model_builder import build_model
 import gurobipy as gp
 from gurobipy import GRB
 

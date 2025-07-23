@@ -20,6 +20,8 @@ from .data_structure import (
     StartupCategory,
 )
 
+from .params import DataParams
+
 
 def ts(x, T, default=None):
     return _timeseries(x, T, default=default)
@@ -48,7 +50,7 @@ def _parse_version(v):
         return (0, 0)
 
 
-def _migrate(json_: dict) -> None:
+def migrate(json_: dict) -> None:
     """
     Bring legacy (< 0.4) files up to date:
         * v0.2 → v0.3:  restructure reserves & generator flags
@@ -93,7 +95,7 @@ def _migrate_to_v04(json_: dict) -> None:
         gen.setdefault("Type", "Thermal")
 
 
-def _from_json(j: dict) -> UnitCommitmentScenario:
+def from_json(j: dict) -> UnitCommitmentScenario:
     # -- Time grid ---------------------------------------------------------- #
     par = j["Parameters"]
     time_horizon = (
@@ -107,7 +109,7 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
         time_horizon *= 60  # convert hours → minutes
 
     time_horizon = int(time_horizon)
-    time_step = int(_scalar(par.get("Time step (min)"), default=60))
+    time_step = int(_scalar(par.get("Time step (min)"), default=DataParams.TIMESTEP))
     if 60 % time_step or time_horizon % time_step:
         raise ValueError("Time step must divide 60 and the horizon")
 
@@ -142,7 +144,8 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
     #  Penalties                                                             #
     # ---------------------------------------------------------------------- #
     power_balance_penalty = ts(
-        par.get("Power balance penalty ($/MW)"), default=[1000.0] * T
+        par.get("Power balance penalty ($/MW)"),
+        default=[DataParams.BALANCE_PENALTY] * T,
     )
 
     # ---------------------------------------------------------------------- #
@@ -152,7 +155,7 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
         bus = Bus(
             name=bname,
             index=idx,
-            load=ts(bdict.get("Load (MW)"), default=[0.0] * T),
+            load=ts(bdict.get("Load (MW)"), default=[DataParams.LOAD] * T),
         )
         name_to_bus[bname] = bus
         buses.append(bus)
@@ -165,10 +168,11 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
             r = Reserve(
                 name=rname,
                 type=rdict.get("Type", "spinning").lower(),
-                amount=ts(rdict.get("Amount (MW)"), default=[0.0] * T),
+                amount=ts(rdict.get("Amount (MW)"), default=[DataParams.RESERVS] * T),
                 thermal_units=[],
                 shortfall_penalty=_scalar(
-                    rdict.get("Shortfall penalty ($/MW)"), default=10
+                    rdict.get("Shortfall penalty ($/MW)"),
+                    default=DataParams.SHORTFALL_PENALTY,
                 ),
             )
             name_to_reserve[rname] = r
@@ -206,8 +210,8 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
                 segments.append(CostSegment(amount=amount, cost=cost))
 
             # Startup categories
-            delays = udict.get("Startup delays (h)", [1])
-            scost = udict.get("Startup costs ($)", [0.0])
+            delays = udict.get("Startup delays (h)", [DataParams.STARTUP_DELAY])
+            scost = udict.get("Startup costs ($)", [DataParams.STARTUP_COST])
             if len(delays) != len(scost):
                 raise ValueError(f"Startup delays/costs mismatch for '{uname}'")
             startup_categories = [
@@ -234,26 +238,37 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
             else:
                 init_s = int(init_s * time_multiplier)
 
-            commitment_status = ts(udict.get("Commitment status"), default=[None] * T)
+            commitment_status = ts(
+                udict.get("Commitment status"),
+                default=[DataParams.COMMITMENT_STATUS] * T,
+            )
 
             tu = ThermalUnit(
                 name=uname,
                 bus=bus,
                 max_power=max_power,
                 min_power=min_power,
-                must_run=ts(udict.get("Must run?", [False] * T)),
+                must_run=ts(udict.get("Must run?", [DataParams.MUST_RUN] * T)),
                 min_power_cost=min_power_cost,
                 segments=segments,
                 min_up=int(
-                    _scalar(udict.get("Minimum uptime (h)"), 1) * time_multiplier
+                    _scalar(udict.get("Minimum uptime (h)"), DataParams.MIN_UPTIME)
+                    * time_multiplier
                 ),
                 min_down=int(
-                    _scalar(udict.get("Minimum downtime (h)"), 1) * time_multiplier
+                    _scalar(udict.get("Minimum downtime (h)"), DataParams.MIN_DOWNTIME)
+                    * time_multiplier
                 ),
-                ramp_up=_scalar(udict.get("Ramp up limit (MW)"), 1e6),
-                ramp_down=_scalar(udict.get("Ramp down limit (MW)"), 1e6),
-                startup_limit=_scalar(udict.get("Startup limit (MW)"), 1e6),
-                shutdown_limit=_scalar(udict.get("Shutdown limit (MW)"), 1e6),
+                ramp_up=_scalar(udict.get("Ramp up limit (MW)"), DataParams.RAMP_UP),
+                ramp_down=_scalar(
+                    udict.get("Ramp down limit (MW)"), DataParams.RAMP_DOWN
+                ),
+                startup_limit=_scalar(
+                    udict.get("Startup limit (MW)"), DataParams.STARTUP_LIMIT
+                ),
+                shutdown_limit=_scalar(
+                    udict.get("Shutdown limit (MW)"), DataParams.SHUTDOWN_LIMIT
+                ),
                 initial_status=init_s,
                 initial_power=init_p,
                 startup_categories=startup_categories,
@@ -270,9 +285,11 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
             pu = ProfiledUnit(
                 name=uname,
                 bus=bus,
-                min_power=ts(_scalar(udict.get("Minimum power (MW)"), 0.0)),
+                min_power=ts(
+                    _scalar(udict.get("Minimum power (MW)"), DataParams.MINIMUM_POWER)
+                ),
                 max_power=ts(udict.get("Maximum power (MW)")),
-                cost=ts(udict.get("Cost ($/MW)"), default=[0.0] * T),
+                cost=ts(udict.get("Cost ($/MW)"), default=[DataParams.COST] * T),
             )
             bus.profiled_units.append(pu)
             profiled_units.append(pu)
@@ -297,12 +314,17 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
                 source=source,
                 target=target,
                 susceptance=float(ldict["Susceptance (S)"]),
-                normal_limit=ts(ldict.get("Normal flow limit (MW)"), default=[1e8] * T),
+                normal_limit=ts(
+                    ldict.get("Normal flow limit (MW)"),
+                    default=[DataParams.FLOW_LIMIT] * T,
+                ),
                 emergency_limit=ts(
-                    ldict.get("Emergency flow limit (MW)"), default=[1e8] * T
+                    ldict.get("Emergency flow limit (MW)"),
+                    default=[DataParams.EMERGENCY_FLOW_LIMIT] * T,
                 ),
                 flow_penalty=ts(
-                    ldict.get("Flow limit penalty ($/MW)"), default=[5000.0] * T
+                    ldict.get("Flow limit penalty ($/MW)"),
+                    default=[DataParams.FLOW_LIMIT_PENALTY] * T,
                 ),
             )
             lines.append(line)
@@ -314,9 +336,9 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
     if "Contingencies" in j:
         for cname, cdict in j["Contingencies"].items():
             affected_lines = [
-                name_to_line[l]
-                for l in cdict.get("Affected lines", [])
-                if l in name_to_line
+                name_to_line[line]
+                for line in cdict.get("Affected lines", [])
+                if line in name_to_line
             ]
             affected_units = [
                 name_to_unit[u]
@@ -338,8 +360,10 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
             load = PriceSensitiveLoad(
                 name=lname,
                 bus=bus,
-                demand=ts(ldict.get("Demand (MW)"), default=[0.0] * T),
-                revenue=ts(ldict.get("Revenue ($/MW)"), default=[0.0] * T),
+                demand=ts(ldict.get("Demand (MW)"), default=[DataParams.DEMAND] * T),
+                revenue=ts(
+                    ldict.get("Revenue ($/MW)"), default=[DataParams.DEMAND_REVENUE] * T
+                ),
             )
             loads.append(load)
             bus.price_sensitive_loads.append(load)
@@ -353,7 +377,9 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
             if bus_name not in name_to_bus:
                 raise ValueError(f"Unknown bus '{bus_name}' for storage '{sname}'")
             bus = name_to_bus[bus_name]
-            min_level = ts(_scalar(sdict.get("Minimum level (MWh)"), 0.0))
+            min_level = ts(
+                _scalar(sdict.get("Minimum level (MWh)"), DataParams.STORAGE_MINIMUM)
+            )
             max_level = ts(sdict.get("Maximum level (MWh)"))
             su = StorageUnit(
                 name=sname,
@@ -365,20 +391,45 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
                         sdict.get("Allow simultaneous charging and discharging"), True
                     )
                 ),
-                charge_cost=ts(sdict.get("Charge cost ($/MW)"), default=[0.0] * T),
-                discharge_cost=ts(
-                    sdict.get("Discharge cost ($/MW)"), default=[0.0] * T
+                charge_cost=ts(
+                    sdict.get("Charge cost ($/MW)"),
+                    default=[DataParams.STORAGE_CHARGE_COST] * T,
                 ),
-                charge_eff=ts(_scalar(sdict.get("Charge efficiency"), 1.0)),
-                discharge_eff=ts(_scalar(sdict.get("Discharge efficiency"), 1.0)),
-                loss_factor=ts(_scalar(sdict.get("Loss factor"), 0.0)),
-                min_charge=ts(_scalar(sdict.get("Minimum charge rate (MW)"), 0.0)),
+                discharge_cost=ts(
+                    sdict.get("Discharge cost ($/MW)"),
+                    default=[DataParams.STORAGE_DISCHARGE_COST] * T,
+                ),
+                charge_eff=ts(
+                    _scalar(
+                        sdict.get("Charge efficiency"), DataParams.CHARGE_EFFICIENCY
+                    )
+                ),
+                discharge_eff=ts(
+                    _scalar(
+                        sdict.get("Discharge efficiency"),
+                        DataParams.DISCHARGE_EFFICIENCY,
+                    )
+                ),
+                loss_factor=ts(
+                    _scalar(sdict.get("Loss factor"), DataParams.LOSS_FACTOR)
+                ),
+                min_charge=ts(
+                    _scalar(
+                        sdict.get("Minimum charge rate (MW)"),
+                        DataParams.MIN_CHARGE_RATE,
+                    )
+                ),
                 max_charge=ts(sdict.get("Maximum charge rate (MW)")),
                 min_discharge=ts(
-                    _scalar(sdict.get("Minimum discharge rate (MW)"), 0.0)
+                    _scalar(
+                        sdict.get("Minimum discharge rate (MW)"),
+                        DataParams.MIN_DISCHARGE_RATE,
+                    )
                 ),
                 max_discharge=ts(sdict.get("Maximum discharge rate (MW)")),
-                initial_level=_scalar(sdict.get("Initial level (MWh)"), 0.0),
+                initial_level=_scalar(
+                    sdict.get("Initial level (MWh)"), DataParams.INITIAL_LEVEL
+                ),
                 last_min=_scalar(
                     sdict.get("Last period minimum level (MWh)"), min_level[-1]
                 ),
@@ -402,7 +453,7 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
         buses=buses,
         contingencies_by_name={c.name: c for c in contingencies},
         contingencies=contingencies,
-        lines_by_name={l.name: l for l in lines},
+        lines_by_name={line.name: line for line in lines},
         lines=lines,
         power_balance_penalty=power_balance_penalty,
         price_sensitive_loads_by_name={pl.name: pl for pl in loads},
@@ -427,7 +478,6 @@ def _from_json(j: dict) -> UnitCommitmentScenario:
 
 def _repair(scenario: UnitCommitmentScenario) -> None:
     """
-    Julia's repair! performs several tasks:
       • fills commitment_status for must-run units
       • clamps initial conditions
       • builds ISF/LODF if missing
@@ -440,7 +490,7 @@ def _repair(scenario: UnitCommitmentScenario) -> None:
                 tu.commitment_status[t] = True
 
 
-def _repair_scenario_names_and_probabilities(
+def repair_scenario_names_and_probabilities(
     scenarios: List[UnitCommitmentScenario], paths: List[str]
 ) -> None:
     """Normalize names and probabilities so they sum to 1."""
