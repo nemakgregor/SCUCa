@@ -22,5 +22,6 @@ def add_variables(model: gp.Model, units: Sequence, T: range):
         (unit.name for unit in units),
         T,
         lb=0.0,
+        name="p[{0},{1}]"
     )
     return gen_power
