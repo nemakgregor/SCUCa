@@ -1,3 +1,4 @@
+# src/data_preparation/params.py
 from pathlib import Path
 
 
@@ -13,7 +14,7 @@ class DataParams:
     TIMESTEP = 60  # minutes
     BALANCE_PENALTY = 1000  # $/MW
 
-    LOAD = 100 # MW
+    LOAD = 100  # MW
     RESERVS = 0  # MW
     SHORTFALL_PENALTY = 100  # $/MW
 

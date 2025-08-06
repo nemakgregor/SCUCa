@@ -5,6 +5,7 @@ from typing import List, Dict
 
 import numpy as np
 from scipy import sparse
+import logging
 
 from .data_structure import (
     UnitCommitmentScenario,
@@ -20,7 +21,12 @@ from .data_structure import (
     StartupCategory,
 )
 
+from .ptdf_lodf import compute_ptdf_lodf
+
 from .params import DataParams
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 def ts(x, T, default=None):
@@ -35,7 +41,11 @@ def _timeseries(val, T: int, *, default=None):
     """
     if val is None:
         return default if default is not None else [None] * T
-    return val if isinstance(val, list) else [val] * T
+    if isinstance(val, list):
+        if len(val) != T:
+            raise ValueError(f"Time-series length {len(val)} does not match T={T}")
+        return val
+    return [val] * T
 
 
 def _scalar(val, default=None):
@@ -133,6 +143,17 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     name_to_unit: Dict[str, ThermalUnit] = {}  # Only thermal for contingencies
     name_to_reserve: Dict[str, Reserve] = {}
 
+    # logger.debug("Parsing JSON data structure")
+    # for key, value in j.items():
+    #     if isinstance(value, dict):
+    #         logger.debug(f" - {key}: dict with {len(value)} keys")
+    #         for subkey in list(value.keys()):
+    #             logger.debug(f"    - {subkey}")
+    #     elif isinstance(value, list):
+    #         logger.debug(f" - {key}: list of length {len(value)}")
+    #     else:
+    #         logger.debug(f" - {key}: {value}")
+
     # ---------------------------------------------------------------------- #
     #  Helper to make sure each list has length T                            #
     # ---------------------------------------------------------------------- #
@@ -152,6 +173,8 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     #  Buses                                                                 #
     # ---------------------------------------------------------------------- #
     for idx, (bname, bdict) in enumerate(j.get("Buses", {}).items(), start=1):
+        if "Load (MW)" not in bdict:
+            raise ValueError(f"Bus '{bname}' missing 'Load (MW)'")
         bus = Bus(
             name=bname,
             index=idx,
@@ -165,9 +188,14 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     # ---------------------------------------------------------------------- #
     if "Reserves" in j:
         for rname, rdict in j["Reserves"].items():
+            if "Amount (MW)" not in rdict:
+                raise ValueError(f"Reserve '{rname}' missing 'Amount (MW)'")
+            r_type = rdict.get("Type", "spinning").lower()
+            if r_type != "spinning":
+                raise ValueError(f"Unsupported reserve type '{r_type}' for '{rname}'")
             r = Reserve(
                 name=rname,
-                type=rdict.get("Type", "spinning").lower(),
+                type=r_type,
                 amount=ts(rdict.get("Amount (MW)"), default=[DataParams.RESERVS] * T),
                 thermal_units=[],
                 shortfall_penalty=_scalar(
@@ -189,10 +217,21 @@ def from_json(j: dict) -> UnitCommitmentScenario:
         bus = name_to_bus[bus_name]
 
         if utype.lower() == "thermal":
-            # Production cost curve
+            # Production cost curve validation and parsing
+            if (
+                "Production cost curve (MW)" not in udict
+                or "Production cost curve ($)" not in udict
+            ):
+                raise ValueError(f"Generator '{uname}' missing production cost curve")
             curve_mw = udict["Production cost curve (MW)"]
             curve_cost = udict["Production cost curve ($)"]
+
             K = len(curve_mw)
+            if K < 2:
+                raise ValueError(
+                    f"Generator '{uname}' must have ≥2 break-points (has {K})"
+                )
+
             curve_mw = np.column_stack([ts(curve_mw[k]) for k in range(K)])
             curve_cost = np.column_stack([ts(curve_cost[k]) for k in range(K)])
 
@@ -200,26 +239,45 @@ def from_json(j: dict) -> UnitCommitmentScenario:
             max_power = curve_mw[:, -1].tolist()
             min_power_cost = curve_cost[:, 0].tolist()
 
-            segments = []
+            segments: list[CostSegment] = []
             for k in range(1, K):
-                amount = (curve_mw[:, k] - curve_mw[:, k - 1]).tolist()
-                cost = (
-                    (curve_cost[:, k] - curve_cost[:, k - 1])
-                    / np.maximum(np.array(amount), 1e-9)
-                ).tolist()
-                segments.append(CostSegment(amount=amount, cost=cost))
+                amount = curve_mw[:, k] - curve_mw[:, k - 1]
+                # marginal $/MW; Julia: replace!(NaN => 0)
+                marginal = np.divide(
+                    curve_cost[:, k] - curve_cost[:, k - 1],
+                    amount,
+                    out=np.zeros_like(amount, dtype=float),  # avoids 0/0 warning
+                    where=amount != 0,
+                )
+                # or simpler: marginal = np.nan_to_num((Δcost)/amount, nan=0.0)
+                segments.append(
+                    CostSegment(amount=amount.tolist(), cost=marginal.tolist())
+                )
 
-            # Startup categories
+            if len(segments) == 0:
+                logger.warning(
+                    f"Number of cost segments ({len(segments)}) does not match time horizon T={T} for generator '{uname}'"
+                )
+                logger.warning(f"Segments for '{uname}': {segments}")
+                logger.warning(f"Curve MW for '{uname}': {curve_mw}")
+                logger.warning(f"Curve cost for '{uname}': {curve_cost}\n\n")
+            else:
+                logger.debug(f"Generator '{uname}' segments:\n {segments}\n\n")
+
+            # Startup categories validation and parsing
             delays = udict.get("Startup delays (h)", [DataParams.STARTUP_DELAY])
             scost = udict.get("Startup costs ($)", [DataParams.STARTUP_COST])
             if len(delays) != len(scost):
                 raise ValueError(f"Startup delays/costs mismatch for '{uname}'")
-            startup_categories = [
-                StartupCategory(
-                    delay_steps=int(delays[k] * time_multiplier), cost=scost[k]
-                )
-                for k in range(len(delays))
-            ]
+            startup_categories = sorted(
+                [
+                    StartupCategory(
+                        delay_steps=int(delays[k] * time_multiplier), cost=scost[k]
+                    )
+                    for k in range(len(delays))
+                ],
+                key=lambda cat: cat.delay_steps,
+            )
 
             # Reserve eligibility
             unit_reserves = [
@@ -228,15 +286,21 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 if n in name_to_reserve
             ]
 
-            # Initial conditions
+            # Initial conditions validation
             init_p = udict.get("Initial power (MW)")
             init_s = udict.get("Initial status (h)")
-            if init_p is None:
-                init_s = None
-            elif init_s is None:
-                raise ValueError(f"{uname} has power but no status")
-            else:
+            if init_p is not None and init_s is None:
+                raise ValueError(f"{uname} has initial power but no status")
+            if init_s is not None:
                 init_s = int(init_s * time_multiplier)
+                if init_p > 0 and init_s <= 0:
+                    raise ValueError(f"{uname} initial power >0 but status <=0")
+
+            # Ramp and limits validation
+            ramp_up = _scalar(udict.get("Ramp up limit (MW)"), DataParams.RAMP_UP)
+            ramp_down = _scalar(udict.get("Ramp down limit (MW)"), DataParams.RAMP_DOWN)
+            if ramp_up <= 0 or ramp_down <= 0:
+                raise ValueError(f"Invalid ramp limits for '{uname}'")
 
             commitment_status = ts(
                 udict.get("Commitment status"),
@@ -259,10 +323,8 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                     _scalar(udict.get("Minimum downtime (h)"), DataParams.MIN_DOWNTIME)
                     * time_multiplier
                 ),
-                ramp_up=_scalar(udict.get("Ramp up limit (MW)"), DataParams.RAMP_UP),
-                ramp_down=_scalar(
-                    udict.get("Ramp down limit (MW)"), DataParams.RAMP_DOWN
-                ),
+                ramp_up=ramp_up,
+                ramp_down=ramp_down,
                 startup_limit=_scalar(
                     udict.get("Startup limit (MW)"), DataParams.STARTUP_LIMIT
                 ),
@@ -280,6 +342,20 @@ def from_json(j: dict) -> UnitCommitmentScenario:
             name_to_unit[uname] = tu
             for r in unit_reserves:
                 r.thermal_units.append(tu)
+
+            logger.debug(
+                f"ThermalUnit '{uname}':\n"
+                f"  bus={bus.name}, min_power={min_power}, max_power={max_power}\n"
+                f"  min_power_cost={min_power_cost}\n"
+                f"  segments={segments}\n"
+                f"  min_up={tu.min_up}, min_down={tu.min_down}\n"
+                f"  ramp_up={ramp_up}, ramp_down={ramp_down}\n"
+                f"  startup_limit={tu.startup_limit}, shutdown_limit={tu.shutdown_limit}\n"
+                f"  initial_status={init_s}, initial_power={init_p}\n"
+                f"  startup_categories={startup_categories}\n"
+                f"  reserves={[r.name for r in unit_reserves]}\n"
+                f"  commitment_status={commitment_status}\n"
+            )
 
         elif utype.lower() == "profiled":
             pu = ProfiledUnit(
@@ -308,6 +384,8 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 raise ValueError(f"Unknown bus in line '{lname}'")
             source = name_to_bus[source_name]
             target = name_to_bus[target_name]
+            if "Susceptance (S)" not in ldict:
+                raise ValueError(f"Line '{lname}' missing susceptance")
             line = TransmissionLine(
                 name=lname,
                 index=idx,
@@ -473,6 +551,9 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     )
 
     _repair(scenario)
+    print(
+        f"Parsed scenario: {len(buses)} buses, {len(thermal_units)} thermal units, {len(lines)} lines, {len(reserves)} reserves"
+    )
     return scenario
 
 
@@ -488,6 +569,10 @@ def _repair(scenario: UnitCommitmentScenario) -> None:
         for t, mr in enumerate(tu.must_run):
             if mr:
                 tu.commitment_status[t] = True
+
+    # Compute PTDF/LODF if lines present
+    if scenario.lines:
+        compute_ptdf_lodf(scenario)
 
 
 def repair_scenario_names_and_probabilities(

@@ -1,1 +1,1 @@
-from src.optimization_model.solver.constraints.test_constraints import add_constraints
+from src.optimization_model.solver.constraints import power_balance

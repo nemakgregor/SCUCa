@@ -1,3 +1,4 @@
+# src/data_preparation/data_structure.py
 from dataclasses import dataclass, field
 from typing import List, Dict, Union, Optional
 import scipy.sparse as sp
