@@ -1,12 +1,8 @@
 import gurobipy as gp
 from gurobipy import GRB
 
-import sys
-import os
-
-# Imports adjusted to use relative imports for package structure
-from ...data_preparation.read_data import read_benchmark
-from .model_builder import build_model
+from src.data_preparation.read_data import read_benchmark
+from src.optimization_model.SCUC_solver.model_builder import build_model
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
-
     # if model.status == GRB.OPTIMAL:
     #     x = model.getVarByName("x")
     #     y = model.getVarByName("y")
