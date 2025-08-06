@@ -1,1 +1,1 @@
-from src.optimization_model.solver.vars.test_vars import add_variables
+from src.optimization_model.solver.vars import generators_power

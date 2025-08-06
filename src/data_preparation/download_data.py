@@ -1,6 +1,8 @@
+# src/data_preparation/download_data.py
 import requests
 from pathlib import Path
 from tqdm import tqdm
+
 
 def download(url: str, dst: Path, chunk: int = 1 << 20) -> None:
     """Stream a file to *dst* with a progress bar."""
@@ -13,4 +15,5 @@ def download(url: str, dst: Path, chunk: int = 1 << 20) -> None:
             tqdm(total=total, unit="B", unit_scale=True, disable=total == 0) as bar,
         ):
             for chunk_data in r.iter_content(chunk_size=chunk):
-                fh.write(chunk_data)
+                size = fh.write(chunk_data)
+                bar.update(size)
