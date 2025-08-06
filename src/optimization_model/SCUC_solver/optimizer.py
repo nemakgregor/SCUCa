@@ -44,9 +44,10 @@ if __name__ == "__main__":
     model.optimize()
 
     if model.status == GRB.OPTIMAL:
-        x = model.getVarByName("x")
-        y = model.getVarByName("y")
         logger.info(f"Optimal solution found:")
         logger.info(f"Objective value = {model.ObjVal}")
+        # Optionally, to inspect all variable values:
+        # for v in model.getVars():
+        #     logger.info(f"{v.VarName} = {v.X}")
     else:
         logger.info("No optimal solution found.")
