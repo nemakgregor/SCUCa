@@ -4,12 +4,9 @@ from gurobipy import GRB
 import sys
 import os
 
-# Add the src directory to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
-
-from src.data_preparation.read_data import read_benchmark
-from model_builder import build_model
-
+# Imports adjusted to use relative imports for package structure
+from ...data_preparation.read_data import read_benchmark
+from .model_builder import build_model
 import logging
 
 logging.basicConfig(level=logging.INFO)
