@@ -5,6 +5,12 @@ __pycache__/
 # Downloaded datasets
 src/data/input/
 instances/**/gurobi_cases.zip
+drafts/
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
+
+# Virtual environment
+venv/
+SCUC/
+
