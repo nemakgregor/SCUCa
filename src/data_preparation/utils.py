@@ -7,7 +7,7 @@ import numpy as np
 from scipy import sparse
 import logging
 
-from .data_structure import (
+from src.data_preparation.data_structure import (
     UnitCommitmentScenario,
     ThermalUnit,
     ProfiledUnit,
@@ -25,7 +25,7 @@ from .ptdf_lodf import compute_ptdf_lodf
 
 from .params import DataParams
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -223,46 +223,79 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 or "Production cost curve ($)" not in udict
             ):
                 raise ValueError(f"Generator '{uname}' missing production cost curve")
-            curve_mw = udict["Production cost curve (MW)"]
-            curve_cost = udict["Production cost curve ($)"]
+            curve_mw_list = udict["Production cost curve (MW)"]
+            curve_cost_list = udict["Production cost curve ($)"]
 
-            K = len(curve_mw)
-            if K < 2:
+            K = len(curve_mw_list)
+            if len(curve_cost_list) != K:
                 raise ValueError(
-                    f"Generator '{uname}' must have ≥2 break-points (has {K})"
+                    f"Generator '{uname}' production cost curve lengths mismatch (MW: {K}, $: {len(curve_cost_list)})"
                 )
+            if K == 0:
+                raise ValueError(f"Generator '{uname}' has no break-points (K=0)")
 
-            curve_mw = np.column_stack([ts(curve_mw[k]) for k in range(K)])
-            curve_cost = np.column_stack([ts(curve_cost[k]) for k in range(K)])
-
-            min_power = curve_mw[:, 0].tolist()
-            max_power = curve_mw[:, -1].tolist()
-            min_power_cost = curve_cost[:, 0].tolist()
-
-            segments: list[CostSegment] = []
-            for k in range(1, K):
-                amount = curve_mw[:, k] - curve_mw[:, k - 1]
-                # marginal $/MW; Julia: replace!(NaN => 0)
-                marginal = np.divide(
-                    curve_cost[:, k] - curve_cost[:, k - 1],
-                    amount,
-                    out=np.zeros_like(amount, dtype=float),  # avoids 0/0 warning
-                    where=amount != 0,
-                )
-                # or simpler: marginal = np.nan_to_num((Δcost)/amount, nan=0.0)
-                segments.append(
-                    CostSegment(amount=amount.tolist(), cost=marginal.tolist())
-                )
-
-            if len(segments) == 0:
+            if K == 1:
+                # Add [0, 0] to represent off state, making K=2
                 logger.warning(
-                    f"Number of cost segments ({len(segments)}) does not match time horizon T={T} for generator '{uname}'"
+                    f"Generator '{uname}' has only one break-point (K=1). Adding [0, 0] to represent off state."
                 )
-                logger.warning(f"Segments for '{uname}': {segments}")
-                logger.warning(f"Curve MW for '{uname}': {curve_mw}")
-                logger.warning(f"Curve cost for '{uname}': {curve_cost}\n\n")
-            else:
-                logger.debug(f"Generator '{uname}' segments:\n {segments}\n\n")
+                curve_mw_list = [0] + curve_mw_list  # [0, 100] for g6
+                curve_cost_list = [0] + curve_cost_list  # [0, 10000] for g6
+                K = 2  # Update K
+                logger.warning(f"Updated curve MW list for '{uname}': {curve_mw_list}")
+                logger.warning(f"Updated curve cost list for '{uname}': {curve_cost_list}")
+
+            # Convert to time series arrays and stack
+            curve_mw = np.column_stack([ts(curve_mw_list[k]) for k in range(K)])
+            curve_cost = np.column_stack([ts(curve_cost_list[k]) for k in range(K)])
+
+            # Validate shapes
+            if curve_mw.shape != curve_cost.shape:
+                raise ValueError(
+                    f"Generator '{uname}' production cost curve shapes mismatch after stacking"
+                )
+
+            min_power = curve_mw[:, 0].tolist() 
+            max_power = curve_mw[:, -1].tolist() 
+            min_power_cost = curve_cost[:, 0].tolist()  
+
+            # Initialize segments as list of length T, each a list of CostSegment
+            segments: list[list[CostSegment]] = []
+
+            # Validate strictly increasing MW breakpoints per time step
+            mw_diffs = np.diff(curve_mw, axis=1)
+            if not np.all(mw_diffs > 0):
+                raise ValueError(
+                    f"Generator '{uname}' production cost curve MW must be strictly increasing"
+                )
+
+            # Validate non-decreasing costs
+            cost_diffs = np.diff(curve_cost, axis=1)
+            if not np.all(cost_diffs >= 0):
+                raise ValueError(
+                    f"Generator '{uname}' production cost curve $ must be non-decreasing"
+                )
+
+            # Compute amounts and marginals vectorized (shape (T, K-1))
+            amounts = mw_diffs
+            marginals = np.divide(
+                cost_diffs,
+                amounts,
+                out=np.zeros_like(amounts, dtype=float),
+                where=amounts != 0,
+            )
+
+            # Build segments per time step
+            for t in range(T):
+                t_segments: list[CostSegment] = []
+                for s in range(K - 1):
+                    t_segments.append(
+                        CostSegment(amount=[amounts[t, s]], cost=[marginals[t, s]])
+                    )
+                segments.append(t_segments)
+
+            logger.debug(f"Generator '{uname}' segments:\n {segments}\n\n")
+
 
             # Startup categories validation and parsing
             delays = udict.get("Startup delays (h)", [DataParams.STARTUP_DELAY])
