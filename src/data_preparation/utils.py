@@ -231,7 +231,7 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 raise ValueError(
                     f"Generator '{uname}' production cost curve lengths mismatch (MW: {K}, $: {len(curve_cost_list)})"
                 )
-            if K < 1:
+            if K == 0:
                 raise ValueError(f"Generator '{uname}' has no break-points (K=0)")
 
             if K == 1:
