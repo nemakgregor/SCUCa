@@ -231,7 +231,7 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 raise ValueError(
                     f"Generator '{uname}' production cost curve lengths mismatch (MW: {K}, $: {len(curve_cost_list)})"
                 )
-            if K < 1:
+            if K == 0:
                 raise ValueError(f"Generator '{uname}' has no break-points (K=0)")
 
             if K == 1:
@@ -255,10 +255,9 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                     f"Generator '{uname}' production cost curve shapes mismatch after stacking"
                 )
 
-            T = curve_mw.shape[0]  # Time horizon from the arrays
-            min_power = curve_mw[:, 0].tolist()  # [0, 0, 0, 0] for g6
-            max_power = curve_mw[:, -1].tolist()  # [100, 100, 100, 100] for g6
-            min_power_cost = curve_cost[:, 0].tolist()  # [0, 0, 0, 0] for g6
+            min_power = curve_mw[:, 0].tolist() 
+            max_power = curve_mw[:, -1].tolist() 
+            min_power_cost = curve_cost[:, 0].tolist()  
 
             # Initialize segments as list of length T, each a list of CostSegment
             segments: list[list[CostSegment]] = []
