@@ -291,7 +291,7 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                 t_segments: list[CostSegment] = []
                 for s in range(K - 1):
                     t_segments.append(
-                        CostSegment(amount=amounts[t, s], cost=marginals[t, s])
+                        CostSegment(amount=[amounts[t, s]], cost=[marginals[t, s]])
                     )
                 segments.append(t_segments)
 
