@@ -8,6 +8,11 @@ Minimize:
 import gurobipy as gp
 from typing import Sequence
 
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
+
 
 def set_objective(
     model: gp.Model,
@@ -28,9 +33,6 @@ def set_objective(
                 obj += seg_power[g.name, t, s] * float(g.segments[s].cost[t])
 
     model.setObjective(obj, gp.GRB.MINIMIZE)
-    try:
-        model.getObjective().setAttr("ObjName", "TotalProductionCost")
-    except Exception:
     try:
         model.getObjective().setAttr("ObjName", "TotalProductionCost")
     except Exception:
