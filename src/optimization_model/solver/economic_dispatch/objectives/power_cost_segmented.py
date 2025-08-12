@@ -31,4 +31,7 @@ def set_objective(
     try:
         model.getObjective().setAttr("ObjName", "TotalProductionCost")
     except Exception:
-        pass
+    try:
+        model.getObjective().setAttr("ObjName", "TotalProductionCost")
+    except Exception:
+        logging.exception("Failed to set objective name 'TotalProductionCost'")
