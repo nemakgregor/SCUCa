@@ -28,7 +28,7 @@ from .params import DataParams
 # Do not call basicConfig in a library. Just set this module's logger level.
 # The application should configure handlers/formatters.
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 def ts(x, T, default=None):
@@ -283,11 +283,13 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                     )
             elif K == 1:
                 segments.append(CostSegment(min_power, min_power_cost))
+                # continue
 
             # Check that the number of CostSegment objects matches the time horizon T
             if len(segments[0].amount) != T:
                 logger.warning(
                     f"Generator '{uname}' segments length ({len(segments)}) does not match time horizon T={T}"
+                )
             # Check that the number of CostSegment objects matches the time horizon T
             if not segments or not hasattr(segments[0], "amount"):
                 logger.warning(
