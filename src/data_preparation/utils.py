@@ -288,6 +288,14 @@ def from_json(j: dict) -> UnitCommitmentScenario:
             if len(segments[0].amount) != T:
                 logger.warning(
                     f"Generator '{uname}' segments length ({len(segments)}) does not match time horizon T={T}"
+            # Check that the number of CostSegment objects matches the time horizon T
+            if not segments or not hasattr(segments[0], "amount"):
+                logger.warning(
+                    f"Generator '{uname}' segments is empty or invalid; cannot check segment length against time horizon T={T}"
+                )
+            elif len(segments[0].amount) != T:
+                logger.warning(
+                    f"Generator '{uname}' segments length ({len(segments)}) does not match time horizon T={T}"
                 )
             logger.debug(f"Generator '{uname}' segments:\n {segments}\n\n")
 
