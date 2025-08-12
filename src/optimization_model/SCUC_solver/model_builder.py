@@ -1,20 +1,26 @@
 import gurobipy as gp
-import sys
-import os
 
-from src.optimization_model.solver import objectives, constraints, vars
-
+from src.optimization_model.solver.economic_dispatch import (
+    objectives,
+    constraints,
+    vars,
+)
 from src.data_preparation.data_structure import UnitCommitmentScenario
 
 
 def build_model(scenario: UnitCommitmentScenario) -> gp.Model:
     """Build the optimization model for the given scenario."""
 
-    model = gp.Model("simple_economic_dispatch")
+    model = gp.Model("EconomicDispatch")
 
+    time_periods = range(scenario.time)  # horizon length already in hours
+    generators = scenario.thermal_units
+    buses = scenario.buses
+
+    total_load = [sum(bus.load[t] for bus in buses) for t in time_periods]
     # --------------------------- index sets ----------------------------------
     units = scenario.thermal_units  # list of Unit objects
-    time_periods = range(scenario.time)  # horizon length already in hours
+    
 
     # --------------------------- variables -----------------------------------
     gen_power = vars.generators_power.add_variables(model, units, time_periods)
