@@ -2,7 +2,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from src.data_preparation.read_data import read_benchmark
-from src.optimization_model.SCUC_solver.model_builder import build_model
+from src.optimization_model.SCUC_solver.ed_model_builder import build_model
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -10,17 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
-    # if model.status == GRB.OPTIMAL:
-    #     x = model.getVarByName("x")
-    #     y = model.getVarByName("y")
-    #     print(f"Optimal solution found:")
-    #     print(f"x = {x.X}")
-    #     print(f"y = {y.X}")
-    #     print(f"Objective value = {model.ObjVal}")
-    # else:
-    #     print("No optimal solution found.")
-
     SAMPLE = "test/case14"
+    # SAMPLE = "matpower/case300/2017-06-24"  
     logger.info(f"→ Loading sample instance '{SAMPLE}' …")
     inst = read_benchmark(SAMPLE, quiet=False)
     sc = inst.deterministic
@@ -39,10 +30,31 @@ if __name__ == "__main__":
     model.optimize()
 
     if model.status == GRB.OPTIMAL:
-        logger.info(f"Optimal solution found:")
-        logger.info(f"Objective value = {model.ObjVal}")
-        # Optionally, to inspect all variable values:
-        # for v in model.getVars():
-        #     logger.info(f"{v.VarName} = {v.X}")
+        logger.info("Optimal solution found.")
+        logger.info(f"Objective value = {model.ObjVal:.4f}")
+
+        # Optional: print commitment and total generation per time step
+        gens = sc.thermal_units
+        T = range(sc.time)
+
+        for t in T:
+            load_t = sum(b.load[t] for b in sc.buses)
+            prod_t = 0.0
+            rows = []
+            for g in gens:
+                u = model._commit[g.name, t].X
+                # min power if on
+                p = u * g.min_power[t]
+                # incremental segments
+                seg_sum = 0.0
+                for s in range(len(g.segments) if g.segments else 0):
+                    seg_sum += model._seg_power[g.name, t, s].X
+                p += seg_sum
+                prod_t += p
+                rows.append((g.name, int(round(u)), p))
+            logger.info(f"t={t}  load={load_t:.3f}, production={prod_t:.3f}, slack={prod_t - load_t:.6f}")
+            for r in rows:
+                logger.info(f"    {r[0]:>20s}  u={r[1]}  p={r[2]:.3f}")
+
     else:
         logger.info("No optimal solution found.")
