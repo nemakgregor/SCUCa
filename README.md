@@ -1,12 +1,16 @@
-```
-# SCUCa
+# SCUC
 
-This repository provides a minimal, modular implementation to load standard UnitCommitment.jl benchmark instances and solve a simplified Security Constrained Unit Commitment variant: a segmented Economic Dispatch with unit commitment variables and power balance. Network PTDF/LODF matrices are computed from the input data for future use, but the current optimizer does not yet impose transmission constraints.
+This repository provides a minimal, modular implementation to load standard UnitCommitment.jl benchmark instances and solve a simplified Security Constrained Unit Commitment variant: a segmented Economic Dispatch with unit commitment, reserves, and base-case transmission constraints using PTDF (ISF). Network PTDF/LODF matrices are computed from the input data.
 
 Highlights
 - Data: automatic download and parsing of UnitCommitment.jl JSON instances
+- PTDF/LODF: robust construction that handles parallel lines and explicit reference-bus mapping
 - Model: segmented costs, binary commitment, and system-wide power balance
-- Modular solver components for variables, constraints, and objective
+- Reserves with shortfall penalty; transmission constraints with overflow slacks
+- NEW: N-1 security constraints for contingencies
+  - Line-outage constraints using LODF against emergency limits
+  - Generator-outage constraints using ISF (PTDF) against emergency limits
+- Batch solver to download, solve, and save JSON solutions for multiple instances
 
 ## Quick start
 
@@ -18,18 +22,31 @@ Highlights
 - Then install the Python packages:
 
 ```bash
-pip install gurobipy numpy scipy networkx requests tqdm
+pip install gurobipy numpy scipy requests tqdm
 ```
 
-3) Run the sample
-- This will download the sample instance to a cache directory and solve a segmented ED with commitment:
+3) Solve selected instances in batch and save JSON outputs
+- Example: solve all instances that contain case57, case30, or case14 in their path.
+- Solutions are saved under src/data/output mirroring the input path and without .gz extension. For example:
+  - input:  src/data/input/matpower/case300/2017-06-24.json.gz
+  - output: src/data/output/matpower/case300/2017-06-24.json
+
+```bash
+python -m src.optimization_model.SCUC_solver.solve_instances --include case57 case30 case14
+```
+
+Useful flags:
+- --limit 10        solve at most 10 instances
+- --time-limit 600  Gurobi time limit in seconds (default 600)
+- --mip-gap 0.05    Gurobi MIP gap (default 5%)
+- --dry-run         list instances to solve without solving
+
+4) (Optional) Single sample run (legacy entry point)
+- You can still run the original single-instance optimizer:
 
 ```bash
 python -m src.optimization_model.SCUC_solver.optimizer
 ```
-
-By default, the script loads the instance "test/case14". You can change the instance by editing the SAMPLE variable at the top of src/optimization_model/SCUC_solver/optimizer.py. For example, try:
-- "matpower/case300/2017-06-24"
 
 ## What gets downloaded and where
 
@@ -39,63 +56,38 @@ Instances are fetched on demand from:
 They are cached under:
 - src/data/input
 
-Example: running with SAMPLE="test/case14" stores src/data/input/test/case14.json.gz.
+Solutions are saved as JSON under:
+- src/data/output
+
+Logs are stored under:
+- src/data/logs
+
+Example mapping:
+- running with name "matpower/case300/2017-06-24" stores
+  - src/data/input/matpower/case300/2017-06-24.json.gz (downloaded)
+  - src/data/output/matpower/case300/2017-06-24.json (solution for ML)
 
 ## Repository layout
 
 - src/data_preparation
-  - read_data.py: download/cache and load instances; supports deterministic and stochastic inputs
-  - data_structure.py: typed dataclasses for buses, generators, lines, storage, reserves, etc.
-  - utils.py: robust JSON-to-objects conversion, legacy schema migration, sanity repairs, PTDF/LODF hook
-  - ptdf_lodf.py: builds PTDF and LODF from network susceptances using NetworkX and SciPy
-  - params.py: default values and constants used by the loader
-
+  - ... (unchanged)
 - src/optimization_model/SCUC_solver
-  - ed_model_builder.py: builds a segmented ED with commitment by composing modular components
-  - model_builder.py: simple ED scaffold (kept for reference)
-  - optimizer.py: end-to-end script to load an instance, build the model, and optimize with Gurobi
-
-- src/optimization_model/solver/economic_dispatch
-  - vars: decision variable factories (commitment, segment power)
-  - constraints: commitment fixing, linking, and system-wide power balance
-  - objectives: production cost objective with segmented costs
-  - data: helper to aggregate load over time
-
-## Programmatic use
-
-You can load and solve from a Python session:
-
-```python
-from src.data_preparation.read_data import read_benchmark
-from src.optimization_model.SCUC_solver.ed_model_builder import build_model
-
-inst = read_benchmark("test/case14")
-sc = inst.deterministic
-m = build_model(sc)
-m.optimize()
-print("Objective:", m.objVal)
-```
+  - scuc_model_builder.py: builds a segmented SCUC by composing modular components
+  - solve_instances.py: NEW batch solver (remote listing, download, solve, JSON save)
+  - optimizer.py: legacy single-instance entry point
+- src/optimization_model/helpers
+  - save_json_solution.py: NEW helper to serialize solutions as JSON under src/data/output
 
 ## Notes and scope
 
-- The current model enforces only system-wide power balance with segmented production costs and commitment. It does not include transmission constraints or reserves in the optimizer yet, although the data layer already computes PTDF/LODF and parses reserves.
-- Startup/shutdown costs are parsed and stored where applicable but are not utilized in the current objective.
-- This code is intended as a clear, minimal foundation you can extend with ramping, minimum up/down, reserve constraints, network flows, contingencies, etc.
+- The saved JSON is derived from a structured solution with:
+  - meta (instance/scenario/time info), objective, status,
+  - system totals, per-generator outputs (commitment, segment power, total),
+  - reserves (requirement/provided/shortfall),
+  - network base-case flows and overflow slacks.
 
 ## Troubleshooting
 
 - Gurobi license: ensure a valid Gurobi license is installed and accessible to gurobipy.
-- Networkx/SciPy: PTDF/LODF construction requires networkx and SciPy; install both if you see import errors.
-- Instance names: if an instance name is not found, double-check it exists at the remote instances URL.
-
-## Dependencies
-
-- gurobipy
-- numpy
-- scipy
-- networkx
-- requests
-- tqdm
-
-Python 3.9+ is required (uses modern typing and dataclass features).
-```
+- Remote listing: if the website blocks directory listing, the script falls back to locally cached inputs under src/data/input.
+- Instance filters: --include accepts tokens that should appear in the dataset name (e.g. 'case57', 'case30').
