@@ -1,80 +1,91 @@
 import numpy as np
-import networkx as nx
 from scipy.sparse import csr_matrix
 from .data_structure import UnitCommitmentScenario
 
 
 def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     """
-    Compute PTDF and LODF matrices from network topology and susceptance.
-    Assumes reference bus index 0 (0-based).
+    Compute PTDF (ISF) and LODF matrices from network topology and line susceptances.
+
+    Conventions
+    - scenario.buses have 1-based indices (b.index ∈ {1..N}).
+    - A reference bus is chosen (default: first bus in scenario.buses by its index).
+    - ISF shape is (n_lines, n_buses - 1): columns correspond to non-reference buses.
+    - LODF shape is (n_lines, n_lines).
+    - Orientation follows the line's source->target direction.
     """
-    bus_indices = {bus.name: bus.index - 1 for bus in scenario.buses}  # 0-based indices
-    n_buses = len(scenario.buses)
-    n_lines = len(scenario.lines)
-    line_indices = {line.name: line.index - 1 for line in scenario.lines}  # 0-based
+    buses = scenario.buses
+    lines = scenario.lines
+    n_buses = len(buses)
+    n_lines = len(lines)
 
-    # Build graph
-    G = nx.Graph()
-    for line in scenario.lines:
-        i = bus_indices[line.source.name]
-        j = bus_indices[line.target.name]
-        b = line.susceptance
-        G.add_edge(i, j, susceptance=b, line_idx=line_indices[line.name])
+    if n_buses == 0 or n_lines == 0:
+        scenario.isf = csr_matrix((0, 0), dtype=float)
+        scenario.lodf = csr_matrix((0, 0), dtype=float)
+        return
 
-    # Build B matrix
-    B = np.zeros((n_buses, n_buses))
-    for u, v, data in G.edges(data=True):
-        b = data["susceptance"]
-        B[u, v] = -b
-        B[v, u] = -b
-        B[u, u] += b
-        B[v, v] += b
+    bus_indices_1b = sorted([b.index for b in buses])
+    pos_by_bus1b = {bidx: (i0) for i0, bidx in enumerate(bus_indices_1b)}
+    ref_bus_1b = bus_indices_1b[0]
+    ref_pos = pos_by_bus1b[ref_bus_1b]
 
-    ref = 0  # 0-based reference bus
-    B_red = np.delete(np.delete(B, ref, axis=0), ref, axis=1)
+    B = np.zeros((n_buses, n_buses), dtype=float)
+    for ln in lines:
+        i0 = pos_by_bus1b[ln.source.index]
+        j0 = pos_by_bus1b[ln.target.index]
+        b = float(ln.susceptance)
+        B[i0, i0] += b
+        B[j0, j0] += b
+        B[i0, j0] -= b
+        B[j0, i0] -= b
+
+    keep = [k for k in range(n_buses) if k != ref_pos]
+    B_red = B[np.ix_(keep, keep)]
+
     try:
         X = np.linalg.inv(B_red)
     except np.linalg.LinAlgError:
-        raise ValueError("Singular matrix: Network may be disconnected")
+        X = np.linalg.pinv(B_red)
 
-    # Compute PTDF (n_lines x (n_buses - 1))
-    ptdf = np.zeros((n_lines, n_buses - 1))
-    for line in scenario.lines:
-        l_idx = line_indices[line.name]
-        i = bus_indices[line.source.name]
-        j = bus_indices[line.target.name]
-        x_l = 1 / line.susceptance
-        i_red = i - 1 if i > ref else -1
-        j_red = j - 1 if j > ref else -1
-        row = np.zeros(n_buses - 1)
-        if i_red >= 0:
-            row += X[i_red, :] / x_l
-        if j_red >= 0:
-            row -= X[j_red, :] / x_l
-        ptdf[l_idx] = row
+    non_ref_positions = [k for k in range(n_buses) if k != ref_pos]
+    col_by_pos = {pos: c for c, pos in enumerate(non_ref_positions)}
 
-    # Extend PTDF to include ref bus column (all 0)
-    ptdf_with_ref = np.zeros((n_lines, n_buses))
-    ptdf_with_ref[:, ref + 1 :] = ptdf[:, ref:]  # Shift columns for ref=0
+    isf = np.zeros((n_lines, n_buses - 1), dtype=float)
+    for l_idx, ln in enumerate(lines):
+        i0 = pos_by_bus1b[ln.source.index]
+        j0 = pos_by_bus1b[ln.target.index]
+        b_l = float(ln.susceptance)
+        row = np.zeros(n_buses - 1, dtype=float)
+        if i0 != ref_pos:
+            row += b_l * X[col_by_pos[i0], :]
+        if j0 != ref_pos:
+            row -= b_l * X[col_by_pos[j0], :]
+        isf[l_idx, :] = row
 
-    # Compute LODF (n_lines x n_lines)
-    lodf = np.zeros((n_lines, n_lines))
-    for c_line in scenario.lines:
-        c_idx = line_indices[c_line.name]
-        m = bus_indices[c_line.source.name]
-        n = bus_indices[c_line.target.name]
-        ptdf_c_m = ptdf_with_ref[c_idx, m]
-        ptdf_c_n = ptdf_with_ref[c_idx, n]
-        ptdf_c_mn = ptdf_c_m - ptdf_c_n
-        denom = 1 - ptdf_c_mn
-        if abs(denom) < 1e-6:
-            continue  # Skip self-outage or singular cases
+    isf_full = np.zeros((n_lines, n_buses), dtype=float)
+    for c, pos in enumerate(non_ref_positions):
+        isf_full[:, pos] = isf[:, c]
+
+    lodf = np.zeros((n_lines, n_lines), dtype=float)
+    for c_idx, c_line in enumerate(lines):
+        mpos = pos_by_bus1b[c_line.source.index]
+        npos = pos_by_bus1b[c_line.target.index]
+        ptdf_c_mn = isf_full[c_idx, mpos] - isf_full[c_idx, npos]
+        denom = 1.0 - ptdf_c_mn
+        if abs(denom) < 1e-9:
+            continue
         for l_idx in range(n_lines):
-            ptdf_l_m = ptdf_with_ref[l_idx, m]
-            ptdf_l_n = ptdf_with_ref[l_idx, n]
-            ptdf_l_mn = ptdf_l_m - ptdf_l_n
+            ptdf_l_mn = isf_full[l_idx, mpos] - isf_full[l_idx, npos]
             lodf[l_idx, c_idx] = ptdf_l_mn / denom
 
-    scenario.isf = csr_matrix(ptdf)
-    scenario.lodf = csr_matrix(lodf)
+    # Set diagonal to -1 (outaged line post-flow is zero)
+    np.fill_diagonal(lodf, -1.0)
+
+    # Numerics: drop extremely small entries
+    tol = 1e-10
+    isf[np.abs(isf) < tol] = 0.0
+    lodf[np.abs(lodf) < tol] = 0.0
+
+    scenario.isf = csr_matrix(isf)  # shape (n_lines, n_buses - 1)
+    scenario.lodf = csr_matrix(lodf)  # shape (n_lines, n_lines)
+    scenario.__dict__["ptdf_ref_bus_index"] = ref_bus_1b

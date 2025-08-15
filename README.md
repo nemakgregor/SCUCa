@@ -1,38 +1,93 @@
-# SCUCa
+# SCUC
 
-This repository provides examples for solving the **Security Constrained Unit Commitment (SCUC)** problem.  It contains notebooks and helper modules used in experiments with both mathematical programming and machine learning approaches.
+This repository provides a minimal, modular implementation to load standard UnitCommitment.jl benchmark instances and solve a simplified Security Constrained Unit Commitment variant: a segmented Economic Dispatch with unit commitment, reserves, and base-case transmission constraints using PTDF (ISF). Network PTDF/LODF matrices are computed from the input data.
 
-## Contents
+Highlights
+- Data: automatic download and parsing of UnitCommitment.jl JSON instances
+- PTDF/LODF: robust construction that handles parallel lines and explicit reference-bus mapping
+- Model: segmented costs, binary commitment, and system-wide power balance
+- Reserves with shortfall penalty; transmission constraints with overflow slacks
+- NEW: N-1 security constraints for contingencies
+  - Line-outage constraints using LODF against emergency limits
+  - Generator-outage constraints using ISF (PTDF) against emergency limits
+- Batch solver to download, solve, and save JSON solutions for multiple instances
 
-- `gurobi_scuc.ipynb` &ndash; Jupyter notebook that formulates the SCUC model and solves it using the [Gurobi](https://www.gurobi.com/) optimizer.
-- `ML_baseline.ipynb` &ndash; baseline notebook illustrating a graph-based model for predicting active transmission line constraints.
-- `ml/` &ndash; package with graph utilities and a simple `EdgeModel` used by the notebook.
-- `src/` &ndash; modules for preparing data and building the optimization model.
-- `instances/` &ndash; sample MATPOWER cases, e.g. `case14`.
+## Quick start
 
-For a detailed overview of the GNN formulation, see [this reference](https://arxiv.org/pdf/1706.02216).
+1) Create and activate a virtual environment (optional but recommended)
+- Python 3.9+ is required.
 
-## Usage
-
-Open the notebooks in your preferred Jupyter environment.  The `gurobi_scuc.ipynb` notebook requires a working Gurobi installation.  The machine learning example relies on `torch` and `torch_geometric`.
-
-The dataset under `instances/` includes a single `case14` example, which can be expanded with additional MATPOWER cases as needed.
-
-To test the optimization model from the command line run
+2) Install dependencies
+- Gurobi requires a valid license. If you do not have one, install and license Gurobi first.
+- Then install the Python packages:
 
 ```bash
-python src/optimization_model/SCUC/optimizer.py
+pip install gurobipy numpy scipy requests tqdm
 ```
-which loads a bundled `case300` instance and prints a short summary.
 
-### Python dependencies
+3) Solve selected instances in batch and save JSON outputs
+- Example: solve all instances that contain case57, case30, or case14 in their path.
+- Solutions are saved under src/data/output mirroring the input path and without .gz extension. For example:
+  - input:  src/data/input/matpower/case300/2017-06-24.json.gz
+  - output: src/data/output/matpower/case300/2017-06-24.json
 
-The notebooks require the following additional packages:
+```bash
+python -m src.optimization_model.SCUC_solver.solve_instances --include case57 case30 case14
+```
 
-- `gurobipy`
-- `torch`
-- `torch_geometric`
-- `requests`
-- `tqdm`
+Useful flags:
+- --limit 10        solve at most 10 instances
+- --time-limit 600  Gurobi time limit in seconds (default 600)
+- --mip-gap 0.05    Gurobi MIP gap (default 5%)
+- --dry-run         list instances to solve without solving
 
+4) (Optional) Single sample run (legacy entry point)
+- You can still run the original single-instance optimizer:
 
+```bash
+python -m src.optimization_model.SCUC_solver.optimizer
+```
+
+## What gets downloaded and where
+
+Instances are fetched on demand from:
+- https://axavier.org/UnitCommitment.jl/0.4/instances
+
+They are cached under:
+- src/data/input
+
+Solutions are saved as JSON under:
+- src/data/output
+
+Logs are stored under:
+- src/data/logs
+
+Example mapping:
+- running with name "matpower/case300/2017-06-24" stores
+  - src/data/input/matpower/case300/2017-06-24.json.gz (downloaded)
+  - src/data/output/matpower/case300/2017-06-24.json (solution for ML)
+
+## Repository layout
+
+- src/data_preparation
+  - ... (unchanged)
+- src/optimization_model/SCUC_solver
+  - scuc_model_builder.py: builds a segmented SCUC by composing modular components
+  - solve_instances.py: NEW batch solver (remote listing, download, solve, JSON save)
+  - optimizer.py: legacy single-instance entry point
+- src/optimization_model/helpers
+  - save_json_solution.py: NEW helper to serialize solutions as JSON under src/data/output
+
+## Notes and scope
+
+- The saved JSON is derived from a structured solution with:
+  - meta (instance/scenario/time info), objective, status,
+  - system totals, per-generator outputs (commitment, segment power, total),
+  - reserves (requirement/provided/shortfall),
+  - network base-case flows and overflow slacks.
+
+## Troubleshooting
+
+- Gurobi license: ensure a valid Gurobi license is installed and accessible to gurobipy.
+- Remote listing: if the website blocks directory listing, the script falls back to locally cached inputs under src/data/input.
+- Instance filters: --include accepts tokens that should appear in the dataset name (e.g. 'case57', 'case30').

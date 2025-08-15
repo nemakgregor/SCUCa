@@ -4,7 +4,8 @@ __pycache__/
 
 # Downloaded datasets
 src/data/input/
-instances/**/gurobi_cases.zip
+src/data/logs/
+src/data/output/
 drafts/
 
 # Jupyter notebook checkpoints
@@ -13,4 +14,10 @@ drafts/
 # Virtual environment
 venv/
 SCUC/
+!src/optimization_model/solver/scuc/
+!src/optimization_model/solver/scuc/**
 
+__pycache__/
+*.pyc
+
+openapi/
