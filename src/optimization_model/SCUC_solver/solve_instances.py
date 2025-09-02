@@ -8,17 +8,23 @@ Features
 - Download (cache), build SCUC model, optimize, and save solution as JSON under src/data/output.
 - Skip instances that already have a saved JSON (resume-friendly).
 - Log unsolved instances (with reasons) to src/data/logs.
+- Append per-instance performance rows to ONE CSV per case folder:
+  src/data/output/<case_folder>/perf_<case_tag>_<technique>_<run>.csv
+  e.g., for all items under matpower/case14:
+        src/data/output/matpower/case14/perf_matpower_case14_basic_01.csv
 
 Usage
   python -m src.optimization_model.SCUC_solver.solve_instances --include case57 case30 case14
-Optional
-  --max-depth 4         # recursion depth for remote listing (default 4)
-  --time-limit 600      # Gurobi time limit in seconds (default 600)
-  --mip-gap 0.05        # Gurobi MIP gap (default 0.05)
-  --roots matpower test # sub-roots to search under base URL (default: matpower test)
-  --limit 0             # limit number of instances to solve (0 => no limit)
-  --skip-existing       # skip if JSON output already exists (default True)
-  --dry-run             # only list instances; do not solve
+
+Useful flags:
+  --option basic         # technique tag embedded in CSV filename (basic, warm_start, ...)
+  --max-depth 4
+  --time-limit 600
+  --mip-gap 0.05
+  --roots matpower test
+  --limit 0
+  --skip-existing
+  --dry-run
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from src.optimization_model.helpers.save_json_solution import (
     save_solution_as_json,
     compute_output_path,
 )
+from src.optimization_model.helpers.perf_logger import PerfCSVLogger
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -166,7 +173,11 @@ def list_local_cached_instances(
 
 
 def solve_instance(
-    name: str, time_limit: int, mip_gap: float, skip_existing: bool = True
+    name: str,
+    time_limit: int,
+    mip_gap: float,
+    skip_existing: bool = True,
+    perf_logger: Optional[PerfCSVLogger] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Solve a single instance by name (e.g., 'matpower/case30/2017-06-24').
@@ -202,6 +213,14 @@ def solve_instance(
 
         model.optimize()
         status = model.Status
+
+        # Always log performance for this attempt (even if infeasible or interrupted)
+        if perf_logger is not None:
+            try:
+                csv_path = perf_logger.append_result(name, sc, model)
+                logger.info("Appended performance row to: %s", csv_path)
+            except Exception as e:
+                logger.warning("Failed to append performance CSV row: %s", e)
 
         if status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             out_path = save_solution_as_json(sc, model, instance_name=name)
@@ -258,6 +277,12 @@ def main():
     )
     parser.add_argument("--mip-gap", type=float, default=0.05, help="Gurobi MIP gap")
     parser.add_argument(
+        "--option",
+        type=str,
+        default="basic",
+        help="Technique/option tag placed into CSV filename (e.g., basic, warm_start, redundant_constraints)",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         default=True,
@@ -297,6 +322,11 @@ def main():
             print(n)
         return
 
+    # Create a performance CSV logger for this technique
+    perf_logger = PerfCSVLogger(
+        technique=args.option, base_output_dir=DataParams._OUTPUT
+    )
+
     # 2) Solve
     unsolved_log_name = "unsolved_instances.log"
     solved_log_name = "solved_instances.log"
@@ -316,6 +346,7 @@ def main():
             time_limit=args.time_limit,
             mip_gap=args.mip_gap,
             skip_existing=args.skip_existing,
+            perf_logger=perf_logger,
         )
         if ok:
             solved_count += 1
