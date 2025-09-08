@@ -1,338 +1,629 @@
-import argparse
-import argparse
-import logging
+"""
+RedundancyProvider: k-NN constraint-pruning for contingencies.
+
+Goal
+- Learn from historical solutions (src/data/output) which contingency constraints
+  (line-outage, gen-outage) are always slack with a comfortable margin, so we can
+  skip adding them to the SCUC model for similar instances and reduce model size.
+
+Approach
+- Per case folder (e.g., matpower/case57), build an index over solved outputs:
+  Item = {instance name, feature vector = zscored system load, per-constraint margins}
+- For each solved instance i and scenario sc(i):
+  * For each contingency c and time t:
+    - Line-outage: for each monitored line l and outaged line m with LODF[l,m] = α,
+      estimate post-contingency flow = f_l[t] + α * f_m[t], margin s = F_em(l,t) - |post|.
+    - Gen-outage: for each gen g at bus b with ISF[l,b] = β,
+      estimate post flow = f_l[t] - β * p_g[t], margin s = F_em(l,t) - |post|.
+  * Store s per (l,m,t) and (l,g,t). Positive s = safe slack (redundant candidate).
+- At inference time for a target instance j:
+  * Find nearest neighbor i* by Euclidean distance on zscored load vector.
+  * Build a filter predicate that skips a constraint if neighbor margin s >= thr_rel*F_em.
+    (Absolute thresholds are deprecated and ignored.)
+
+Notes
+- Our SCUC contingency constraints use these same base-case expressions (no explicit redispatch),
+  so using neighbor’s margins is a strong heuristic to prune constraints safely.
+- You can restrict neighbors to the TRAIN split to emulate train/test data usage.
+- If no trained index or no neighbor found, the provider returns None (no pruning).
+
+Artifacts
+- Index is saved to: src/data/intermediate/redundancy/rc_index_<case_tag>.json
+"""
+
+import json
+import gzip
+import math
 from datetime import datetime
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Set, Callable
 
-from typing import List, Optional, Tuple
+from scipy.sparse import csr_matrix, csc_matrix
 
-from gurobipy import GRB
-
-from src.data_preparation.read_data import read_benchmark
-from src.optimization_model.SCUC_solver.scuc_model_builder import build_model
-from src.optimization_model.helpers.save_solution import save_solution_to_log
-from src.optimization_model.helpers.verify_solution import verify_solution_to_log
-from src.optimization_model.helpers.run_utils import allocate_run_id, make_log_filename
-from src.optimization_model.helpers.save_json_solution import (
-    save_solution_as_json,
-    compute_output_path,
-)
-from src.optimization_model.helpers.save_json_solution import (
-    save_solution_as_json,
-    compute_output_path,
-)
 from src.data_preparation.params import DataParams
-
-# Warm-start provider and instance listers
-from src.ml_models.warm_start import WarmStartProvider
-from src.optimization_model.SCUC_solver.solve_instances import (
-    list_remote_instances,
-    list_local_cached_instances,
-)
-
-# Warm-start provider and instance listers
-from src.ml_models.warm_start import WarmStartProvider
-from src.optimization_model.SCUC_solver.solve_instances import (
-    list_remote_instances,
-    list_local_cached_instances,
-)
-
-logging.basicConfig(level=logging.INFO)
-
-logging.getLogger("gurobipy").setLevel(logging.WARNING)
-logging.getLogger("gurobipy").propagate = False
+from src.data_preparation.read_data import read_benchmark
+from src.ml_models.warm_start import _hash01  # deterministic split helper
 
 
-logging.getLogger("gurobipy").setLevel(logging.WARNING)
-logging.getLogger("gurobipy").propagate = False
-
-logger = logging.getLogger(__name__)
-
-# Default remote listing scope (kept internal; no CLI noise)
-_DEFAULT_ROOTS = ["matpower", "test"]
-_DEFAULT_MAX_DEPTH = 4
-
-
-def _status_str(code: int) -> str:
-    mapping = DataParams.SOLVER_STATUS_STR
-    return mapping.get(code, f"STATUS_{code}")
+def _sanitize_name(s: str) -> str:
+    s = (s or "").strip().strip("/\\").replace("\\", "/")
+    out = []
+    for ch in s:
+        out.append(ch if ch.isalnum() else "_")
+    t = "".join(out)
+    while "__" in t:
+        t = t.replace("__", "_")
+    return t.strip("_").lower()
 
 
-def _solve_one(
-    name: str,
-    time_limit: int,
-    mip_gap: float,
-    use_warm_start: bool,
-    require_pretrained: bool,
-    skip_existing: bool,
-    warm_cache: dict,
-    warm_start_mode: str,
-    warm_use_train_db: bool,
-    save_logs: bool,
-) -> Tuple[bool, Optional[str]]:
-    """
-    Solve one dataset by name; optionally apply a warm start if available.
-    Returns (success, output_json_path_if_any).
-    """
-    out_json_path = compute_output_path(name)
-    if skip_existing and out_json_path.is_file():
-        logger.info("Skipping existing solution: %s", out_json_path)
-        return True, str(out_json_path)
+def _case_folder_from_instance(instance_name: str) -> str:
+    parts = instance_name.strip().strip("/\\").replace("\\", "/").split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[:2])
+    return parts[0] if parts else "case"
 
-    inst = read_benchmark(name, quiet=True)
-    sc = inst.deterministic
-    logger.info(
-        "Build '%s' (units=%d, buses=%d, lines=%d, T=%d, dt=%dmin)",
-        name,
-        len(sc.thermal_units),
-        len(sc.buses),
-        len(sc.lines),
-        sc.time,
-        sc.time_step,
-    )
 
-    # Warm-start prepare (only if explicitly requested)
-    wsp = None
-    if use_warm_start:
-        cf = "/".join(name.strip().split("/")[:2])
-        wsp = warm_cache.get(cf)
-        if wsp is None:
-            wsp = WarmStartProvider(case_folder=cf)
-            trained, cov = wsp.ensure_trained(
-                cf, allow_build_if_missing=not require_pretrained
-            )
-            if not trained:
-                logger.info(
-                    "Warm-start: no trained index for %s (coverage=%.3f; require_pretrained=%s)",
-                    cf,
-                    cov,
-                    require_pretrained,
-                )
-                wsp = None
-            else:
-                warm_cache[cf] = wsp
-                logger.info(
-                    "Warm-start: using pre-trained index for %s (coverage=%.3f)",
-                    cf,
-                    cov,
-                )
+def _case_tag(case_folder: str) -> str:
+    return _sanitize_name(case_folder)
 
-    # If trained index present, write warm file for this instance
-    if wsp is not None:
-        try:
-            warm_path = wsp.generate_and_save_warm_start(
-                name, use_train_index_only=warm_use_train_db, exclude_self=True
-            )
-            if warm_path:
-                logger.info("Warm-start file generated: %s", warm_path)
-            else:
-                logger.info(
-                    "Warm-start not generated for '%s' (no neighbor or missing features).",
-                    name,
-                )
-        except Exception as e:
-            logger.warning("Warm-start generation failed for '%s': %s", name, e)
 
-    # Build model
-    model = build_model(sc)
+def _zscore(vec: List[float]) -> List[float]:
+    if not vec:
+        return []
+    mean = sum(vec) / len(vec)
+    var = sum((x - mean) ** 2 for x in vec) / max(1, len(vec) - 1)
+    std = math.sqrt(var) if var > 0 else 1.0
+    return [(x - mean) / std for x in vec]
 
-    # Apply warm start if available
-    if wsp is not None:
-        try:
-            # map CLI term 'fixed' to internal 'repair'
-            mode = warm_start_mode.strip().lower()
-            if mode == "fixed":
-                mode = "repair"
-            assigned = wsp.apply_warm_start_to_model(model, sc, name, mode=mode)
-            if assigned > 0:
-                logger.info(
-                    "Warm-start applied (%s): Start set on %d variable(s).",
-                    mode,
-                    assigned,
-                )
-            else:
-                logger.info("No warm-start variables set.")
-        except Exception as e:
-            logger.warning("Failed to apply warm-start to model: %s", e)
 
-    # Solver params
+def _l2(v1: List[float], v2: List[float]) -> float:
+    if len(v1) != len(v2):
+        L = max(len(v1), len(v2))
+        v1 = v1 + [v1[-1] if v1 else 0.0] * (L - len(v1))
+        v2 = v2 + [v2[-1] if v2 else 0.0] * (L - len(v2))
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(v1, v2)))
+
+
+def _ensure_list_length(vals: List, T: int, pad_with_last: bool = True, default=0.0):
+    if vals is None:
+        return [default] * T
+    vals = list(vals)
+    if len(vals) < T:
+        pad_val = vals[-1] if (pad_with_last and vals) else default
+        vals = vals + [pad_val] * (T - len(vals))
+    elif len(vals) > T:
+        vals = vals[:T]
+    return vals
+
+
+def _load_input_system_load(input_path: Path) -> Optional[List[float]]:
     try:
-        model.Params.OutputFlag = 1
-        model.Params.MIPGap = mip_gap
-        model.Params.TimeLimit = time_limit
-        model.Params.NumericFocus = 1
+        if input_path.suffix == ".gz":
+            with gzip.open(input_path, "rt", encoding="utf-8") as fh:
+                data = json.load(fh)
+        else:
+            with input_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        buses = data.get("Buses", {})
+        T = None
+        for b in buses.values():
+            ld = b.get("Load (MW)", 0.0)
+            if isinstance(ld, list):
+                T = len(ld)
+                break
+        if T is None:
+            T = 1
+        sys_load = [0.0] * T
+        for b in buses.values():
+            ld = b.get("Load (MW)", 0.0)
+            if isinstance(ld, list):
+                for t in range(T):
+                    sys_load[t] += float(ld[t])
+            else:
+                sys_load[0] += float(ld)
+        return sys_load
     except Exception:
-        pass
+        return None
 
-    # Optimize
-    # Optimize
-    model.optimize()
-    logger.info("Solver status: %s", _status_str(model.Status))
-    logger.info("Solver status: %s", _status_str(model.Status))
 
-    # Save JSON solution (used as training data and for later analysis)
-    # Save JSON solution (used as training data and for later analysis)
-    if model.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
+def _load_output_solution(output_path: Path) -> Optional[dict]:
+    try:
+        with output_path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+class RedundancyProvider:
+    """
+    k-NN based predictor to skip (prune) contingency constraints safely.
+
+    Data saved per instance:
+      - features: z-scored system load vector
+      - line_pairs:  dict "l|m" -> [margin_t] where margin_t = F_em(l,t) - |f_l + α f_m|
+      - gen_pairs:   dict "l|g" -> [margin_t] where margin_t = F_em(l,t) - |f_l - β p_g|
+    """
+
+    def __init__(
+        self,
+        case_folder: Optional[str] = None,
+        train_ratio: float = 0.70,
+        val_ratio: float = 0.15,
+        split_seed: int = 42,
+    ):
+        self.base_input = DataParams._CACHE
+        self.base_output = DataParams._OUTPUT
+        self.base_idx = DataParams._INTERMEDIATE / "redundancy"
+        self.base_idx.mkdir(parents=True, exist_ok=True)
+
+        self.case_folder = case_folder
+        self.train_ratio = float(train_ratio)
+        self.val_ratio = float(val_ratio)
+        if self.train_ratio < 0.0:
+            self.train_ratio = 0.0
+        if self.val_ratio < 0.0:
+            self.val_ratio = 0.0
+        if self.train_ratio + self.val_ratio > 1.0:
+            self.val_ratio = max(0.0, 1.0 - self.train_ratio)
+        self.split_seed = int(split_seed)
+
+        # Runtime state
+        self._index: Dict[str, dict] = {}
+        self._coverage: float = 0.0
+        self._available: bool = False
+        self._inputs_list: List[str] = []
+        self._outputs_list: List[str] = []
+        self._splits: Dict[str, Set[str]] = {
+            "train": set(),
+            "val": set(),
+            "test": set(),
+        }
+
+    def _list_inputs(self, case_folder: str) -> List[Path]:
+        case_dir = (self.base_input / case_folder).resolve()
+        if not case_dir.exists():
+            return []
+        return sorted(case_dir.glob("*.json.gz"))
+
+    def _list_outputs(self, case_folder: str) -> List[Path]:
+        case_dir = (self.base_output / case_folder).resolve()
+        if not case_dir.exists():
+            return []
+        return sorted(case_dir.glob("*.json"))
+
+    def _dataset_name_from_output(self, p: Path) -> str:
+        rel = p.resolve().relative_to(self.base_output.resolve()).as_posix()
+        if rel.endswith(".json"):
+            rel = rel[: -len(".json")]
+        return rel
+
+    def _dataset_name_from_input(self, p: Path) -> str:
+        rel = p.resolve().relative_to(self.base_input.resolve()).as_posix()
+        if rel.endswith(".json.gz"):
+            rel = rel[: -len(".json.gz")]
+        return rel
+
+    def _index_path(self, case_folder: str) -> Path:
+        tag = _case_tag(case_folder)
+        return (self.base_idx / f"rc_index_{tag}.json").resolve()
+
+    def _compute_splits_from_names(self, names: List[str]) -> None:
+        tr: Set[str] = set()
+        va: Set[str] = set()
+        te: Set[str] = set()
+        for nm in sorted(names):
+            r = _hash01(nm, self.split_seed)
+            if r < self.train_ratio:
+                tr.add(nm)
+            elif r < self.train_ratio + self.val_ratio:
+                va.add(nm)
+            else:
+                te.add(nm)
+        self._splits = {"train": tr, "val": va, "test": te}
+
+    def _load_index_file(self, case_folder: str) -> bool:
+        path = self._index_path(case_folder)
+        if not path.exists():
+            return False
         try:
-            out_path = save_solution_as_json(sc, model, instance_name=name)
-            logger.info("Saved JSON solution: %s", out_path)
-        except Exception as e:
-            logger.warning("Failed to save JSON solution for '%s': %s", name, e)
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            if obj.get("case_folder") != case_folder:
+                return False
+            items = obj.get("items", [])
+            idx: Dict[str, dict] = {}
+            for it in items:
+                name = it.get("instance")
+                feats = it.get("features", [])
+                lpairs = it.get("line_pairs", {})
+                gpairs = it.get("gen_pairs", {})
+                if not name or feats is None:
+                    continue
+                idx[name] = {
+                    "features": feats,
+                    "line_pairs": lpairs,
+                    "gen_pairs": gpairs,
+                }
+            self._index = idx
+            self._coverage = float(obj.get("coverage", 0.0))
+            self._available = len(self._index) > 0
 
-        if save_logs:
-            # Also write human-readable logs and verification
-            run_id = allocate_run_id(sc.name)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            try:
-                sol_fname = make_log_filename(
-                    kind="solution", scenario=sc.name, run_id=run_id, ts=ts
-                )
-                sol_path = save_solution_to_log(sc, model, filename=sol_fname)
-                logger.info("Full solution saved to: %s", sol_path)
-            except Exception:
-                pass
-            try:
-                ver_fname = make_log_filename(
-                    kind="verify", scenario=sc.name, run_id=run_id, ts=ts
-                )
-                ver_path = verify_solution_to_log(sc, model, filename=ver_fname)
-                logger.info("Verification report saved to: %s", ver_path)
-            except Exception:
-                pass
-        return True, str(out_json_path)
-    else:
-        return False, None
+            self._inputs_list = list(obj.get("inputs", []))
+            self._outputs_list = list(obj.get("outputs", []))
+            split = obj.get("split", None)
+            if isinstance(split, dict):
+                self._splits = {
+                    "train": set(split.get("train", [])),
+                    "val": set(split.get("val", [])),
+                    "test": set(split.get("test", [])),
+                }
+            else:
+                self._compute_splits_from_names(list(self._index.keys()))
+            return True
+        except Exception:
+            return False
 
+    def _save_index_file(self, case_folder: str) -> Path:
+        path = self._index_path(case_folder)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        items = []
+        for name, it in self._index.items():
+            items.append(
+                {
+                    "instance": name,
+                    "features": list(it.get("features", [])),
+                    "line_pairs": it.get("line_pairs", {}),
+                    "gen_pairs": it.get("gen_pairs", {}),
+                }
+            )
+        payload = {
+            "case_folder": case_folder,
+            "built_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "coverage": float(self._coverage),
+            "inputs": list(self._inputs_list),
+            "outputs": list(self._outputs_list),
+            "split": {
+                "train": sorted(self._splits["train"]),
+                "val": sorted(self._splits["val"]),
+                "test": sorted(self._splits["test"]),
+            },
+            "items": items,
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Solve UnitCommitment.jl SCUC instances. Defaults keep everything OFF (no warm start, no logs)."
-    )
-    # What to solve
-    ap.add_argument(
-        "--instances",
-        nargs="*",
-        default=None,
-        help="Explicit dataset names (e.g., matpower/case14/2017-01-01).",
-    )
-    ap.add_argument(
-        "--include",
-        nargs="*",
-        default=None,
-        help="Tokens to include in dataset name (e.g., case57). If omitted, --instances is required.",
-    )
-    ap.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Solve at most N instances (0 => unlimited)",
-    )
+    def _compute_margins_for_instance(
+        self, instance_name: str, out_json: dict
+    ) -> Optional[Tuple[Dict[str, List[float]], Dict[str, List[float]], List[float]]]:
+        """
+        Compute per-constraint margins (line-outage, gen-outage) for one instance.
+        Returns (line_pairs, gen_pairs, feats) or None if not computable.
+        """
+        # Load scenario (to get ISF, LODF, limits)
+        try:
+            inst = read_benchmark(instance_name, quiet=True)
+            sc = inst.deterministic
+        except Exception:
+            return None
+        if not sc.lines:
+            return None
 
-    # Solver controls
-    ap.add_argument("--time-limit", type=int, default=600, help="Gurobi time limit [s]")
-    ap.add_argument("--mip-gap", type=float, default=0.05, help="Gurobi MIP gap")
-    ap.add_argument(
-        "--skip-existing",
-        action="store_true",
-        default=False,
-        help="Do not re-solve instances that already have a JSON solution.",
-    )
-    ap.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="List instances and exit (do not solve)",
-    )
+        T = sc.time
+        # Features: system load (z-scored)
+        try:
+            feats = out_json.get("system", {}).get("load", None)
+            feats = _ensure_list_length([float(x) for x in feats], T, True, 0.0)
+        except Exception:
+            feats = [sum(b.load[t] for b in sc.buses) for t in range(T)]
+        feats = _zscore(feats)
 
-    # Warm start (all OFF by default)
-    ap.add_argument(
-        "--warm",
-        dest="use_warm_start",
-        action="store_true",
-        default=False,
-        help="Use warm start (generate from pre-trained DB if available).",
-    )
-    ap.add_argument(
-        "--require-pretrained",
-        action="store_true",
-        default=False,
-        help="Only use pre-trained warm-start index (do not auto-build from outputs).",
-    )
-    ap.add_argument(
-        "--warm-mode",
-        choices=["fixed", "commit-only", "as-is"],
-        default="fixed",
-        help="Warm-start application mode. 'fixed' = repaired for feasibility (recommended).",
-    )
-    ap.add_argument(
-        "--warm-use-train-db",
-        action="store_true",
-        default=False,
-        help="Restrict neighbor search to the training split of the index.",
-    )
+        # Base flows and gen power from output JSON
+        net = out_json.get("network", {}) or {}
+        lines_out = net.get("lines", {}) or {}
+        if not lines_out:
+            return None
+        flows: Dict[str, List[float]] = {}
+        for ln in sc.lines:
+            obj = lines_out.get(ln.name)
+            if not obj:
+                return None
+            flows[ln.name] = _ensure_list_length(obj.get("flow", []), T, True, 0.0)
 
-    # Logs (OFF by default)
-    ap.add_argument(
-        "--save-logs",
-        action="store_true",
-        default=False,
-        help="Write human-readable solution and verification logs to src/data/logs",
-    )
+        gens_out = out_json.get("generators", {}) or {}
+        pgen: Dict[str, List[float]] = {}
+        for g in sc.thermal_units:
+            gobj = gens_out.get(g.name, {}) or {}
+            p_list = gobj.get("total_power", None)
+            if p_list is None:
+                # reconstruct as min + sum(segments)
+                commit = _ensure_list_length(gobj.get("commit", []), T, True, 0)
+                seg2d = gobj.get("segment_power", None)
+                nS = len(g.segments) if g.segments else 0
+                if isinstance(seg2d, list):
+                    seg2d = _ensure_list_length(seg2d, T, True, [0.0] * nS)
+                else:
+                    seg2d = [[0.0] * nS for _ in range(T)]
+                total = []
+                for t in range(T):
+                    val = float(commit[t]) * float(g.min_power[t])
+                    for s in range(nS):
+                        val += float(seg2d[t][s])
+                    total.append(val)
+                pgen[g.name] = total
+            else:
+                pgen[g.name] = _ensure_list_length(p_list, T, True, 0.0)
 
-    args = ap.parse_args()
+        # Precompute sparse matrices and mappings
+        lodf_csc: csc_matrix = sc.lodf.tocsc()
+        isf_csc: csc_matrix = sc.isf.tocsc()
+        buses = sc.buses
+        ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
+        non_ref_bus_indices = sorted([b.index for b in buses if b.index != ref_1b])
+        col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
+        line_by_row = {ln.index - 1: ln for ln in sc.lines}
+        row_by_line = {ln.name: ln.index - 1 for ln in sc.lines}
 
-    # Build instance list
-    instances: List[str] = []
-    if args.instances:
-        instances = args.instances
-    elif args.include:
-        logger.info("Listing remote instances from: %s", DataParams.INSTANCES_URL)
-        instances = list_remote_instances(
-            include_filters=args.include,
-            roots=_DEFAULT_ROOTS,
-            max_depth=_DEFAULT_MAX_DEPTH,
+        # Compute margins
+        line_pairs: Dict[str, List[float]] = {}
+        gen_pairs: Dict[str, List[float]] = {}
+
+        # Line-outage
+        for cont in sc.contingencies or []:
+            if not cont.lines:
+                continue
+            for out_line in cont.lines:
+                mcol = out_line.index - 1
+                col = lodf_csc.getcol(mcol)
+                for l_row, alpha in zip(col.indices.tolist(), col.data.tolist()):
+                    if l_row == mcol:
+                        continue
+                    line_l = line_by_row.get(l_row)
+                    if line_l is None:
+                        continue
+                    # Build per-t margin
+                    key = f"{line_l.name}|{out_line.name}"
+                    s_vec = line_pairs.get(key)
+                    if s_vec is None:
+                        s_vec = [0.0 for _ in range(T)]
+                        line_pairs[key] = s_vec
+                    for t in range(T):
+                        f_l = float(flows[line_l.name][t])
+                        f_m = float(flows[out_line.name][t])
+                        post = f_l + float(alpha) * f_m
+                        F_em = float(line_l.emergency_limit[t])
+                        s_vec[t] = F_em - abs(post)
+
+        # Gen-outage
+        for cont in sc.contingencies or []:
+            if not getattr(cont, "units", None):
+                continue
+            for gen in cont.units:
+                bidx = gen.bus.index
+                if bidx == ref_1b or bidx not in col_by_bus_1b:
+                    # Effect zero or undefined; margin = F_em - |f_l|
+                    col = None
+                else:
+                    col = isf_csc.getcol(col_by_bus_1b[bidx])
+
+                # Build margin per line,time
+                if col is None:
+                    # No ISF column => post = f_l (no change)
+                    for line_l in sc.lines:
+                        key = f"{line_l.name}|{gen.name}"
+                        s_vec = gen_pairs.get(key)
+                        if s_vec is None:
+                            s_vec = [0.0 for _ in range(T)]
+                            gen_pairs[key] = s_vec
+                        for t in range(T):
+                            f_l = float(flows[line_l.name][t])
+                            F_em = float(line_l.emergency_limit[t])
+                            s_vec[t] = F_em - abs(f_l)
+                else:
+                    rows = col.indices.tolist()
+                    vals = col.data.tolist()
+                    isf_map = {r: v for r, v in zip(rows, vals)}
+                    for line_l in sc.lines:
+                        key = f"{line_l.name}|{gen.name}"
+                        s_vec = gen_pairs.get(key)
+                        if s_vec is None:
+                            s_vec = [0.0 for _ in range(T)]
+                            gen_pairs[key] = s_vec
+                        beta = float(isf_map.get(row_by_line[line_l.name], 0.0))
+                        for t in range(T):
+                            f_l = float(flows[line_l.name][t])
+                            p_g = float(pgen[gen.name][t])
+                            post = f_l - beta * p_g
+                            F_em = float(line_l.emergency_limit[t])
+                            s_vec[t] = F_em - abs(post)
+
+        return line_pairs, gen_pairs, feats
+
+    def _build_index(self, case_folder: str) -> None:
+        inputs = self._list_inputs(case_folder)
+        outputs = self._list_outputs(case_folder)
+        total_inputs = len(inputs)
+        total_outputs = len(outputs)
+        self._coverage = (total_outputs / total_inputs) if total_inputs > 0 else 0.0
+
+        self._inputs_list = [self._dataset_name_from_input(p) for p in inputs]
+        outputs_names = [self._dataset_name_from_output(p) for p in outputs]
+
+        idx: Dict[str, dict] = {}
+        for out_path in outputs:
+            out = _load_output_solution(out_path)
+            if not out:
+                continue
+            instance_name = self._dataset_name_from_output(out_path)
+            computed = self._compute_margins_for_instance(instance_name, out)
+            if computed is None:
+                continue
+            line_pairs, gen_pairs, feats = computed
+            idx[instance_name] = {
+                "features": feats,
+                "line_pairs": line_pairs,
+                "gen_pairs": gen_pairs,
+            }
+
+        self._index = idx
+        self._available = len(self._index) > 0
+        self._compute_splits_from_names(sorted(self._index.keys()))
+
+    def pretrain(
+        self, case_folder: Optional[str] = None, force: bool = False
+    ) -> Optional[Path]:
+        cf = case_folder or self.case_folder
+        if not cf:
+            return None
+        path = self._index_path(cf)
+        if path.exists() and not force:
+            if self._load_index_file(cf):
+                return path
+        self._build_index(cf)
+        if not self._index:
+            return None
+        return self._save_index_file(cf)
+
+    def ensure_trained(
+        self, case_folder: Optional[str] = None, allow_build_if_missing: bool = True
+    ) -> Tuple[bool, float]:
+        cf = case_folder or self.case_folder
+        if not cf:
+            return False, 0.0
+        if self._load_index_file(cf):
+            return (self._available, self._coverage)
+        if allow_build_if_missing:
+            self._build_index(cf)
+            return (self._available, self._coverage)
+        return False, 0.0
+
+    def _nearest_neighbor(
+        self,
+        target_feats: List[float],
+        restrict_to_names: Optional[Set[str]] = None,
+        exclude_names: Optional[Set[str]] = None,
+    ) -> Optional[Tuple[str, dict, float]]:
+        best_name = None
+        best_item = None
+        best_dist = float("inf")
+        for name, item in self._index.items():
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
+            if exclude_names is not None and name in exclude_names:
+                continue
+            d = _l2(target_feats, item.get("features", []))
+            if d < best_dist:
+                best_dist = d
+                best_item = item
+                best_name = name
+        if best_item is None:
+            return None
+        return best_name, best_item, best_dist
+
+    def make_filter_for_instance(
+        self,
+        scenario,
+        instance_name: str,
+        *,
+        thr_abs: float = 20.0,  # deprecated (ignored)
+        thr_rel: float = 0.10,
+        use_train_index_only: bool = True,
+        exclude_self: bool = True,
+    ) -> Optional[Tuple[Callable, Dict]]:
+        """
+        Build a filter predicate closure for contingencies.add_constraints.
+
+        A constraint is pruned (skipped) if neighbor margin s >= thr_rel * F_em.
+        Absolute thresholds are deprecated and ignored.
+
+        Returns (predicate, stats) or None if no trained index/neighbor.
+        stats = {"neighbor": str, "distance": float, "skipped_line": int, "skipped_gen": int}
+        """
+        case_folder = _case_folder_from_instance(instance_name)
+        if not self._index:
+            self.ensure_trained(case_folder, allow_build_if_missing=False)
+        if not self._index:
+            return None
+
+        # Target features from input JSON system load
+        input_path = (DataParams._CACHE / (instance_name + ".json.gz")).resolve()
+        target_load = _load_input_system_load(input_path)
+        if not target_load:
+            return None
+        T = scenario.time
+        target_feats = _zscore(
+            _ensure_list_length([float(x) for x in target_load], T, True, 0.0)
         )
-        if not instances:
-            logger.warning("Remote listing returned none. Falling back to local cache.")
-            instances = list_local_cached_instances(include_filters=args.include)
-        if not instances:
-            logger.error("No instances found for include tokens: %s", args.include)
-            return
-    else:
-        logger.error("Please pass either --instances or --include filters.")
-        return
 
-    if args.dry_run:
-        for n in instances:
-            print(n)
-        return
-
-    # Solve
-    warm_cache = {}  # case_folder -> WarmStartProvider (loaded index)
-    limit = args.limit if args.limit and args.limit > 0 else None
-    solved = 0
-    total = 0
-    for name in instances:
-        if limit is not None and total >= limit:
-            break
-        total += 1
-        logger.info("[%d/%s] Solving %s", total, str(limit) if limit else "-", name)
-        ok, out_json = _solve_one(
-            name=name,
-            time_limit=args.time_limit,
-            mip_gap=args.mip_gap,
-            use_warm_start=args.use_warm_start,
-            require_pretrained=args.require_pretrained,
-            skip_existing=args.skip_existing,
-            warm_cache=warm_cache,
-            warm_start_mode=args.warm_mode,
-            warm_use_train_db=args.warm_use_train_db,
-            save_logs=args.save_logs,
+        restrict = self._splits["train"] if use_train_index_only else None
+        exclude = {instance_name} if exclude_self else None
+        nn = self._nearest_neighbor(
+            target_feats, restrict_to_names=restrict, exclude_names=exclude
         )
-        if ok:
-            solved += 1
+        if nn is None:
+            return None
+        nn_name, nn_item, nn_dist = nn
 
-    logger.info("Done. Solved %d/%d", solved, total)
+        # Build skip sets
+        line_pairs = nn_item.get("line_pairs", {}) or {}
+        gen_pairs = nn_item.get("gen_pairs", {}) or {}
 
+        # Relative-only threshold
+        thr = lambda F_em: float(thr_rel) * float(F_em)
 
-if __name__ == "__main__":
-    main()
+        # Pre-generate skip masks as dict[(lname, oname, t)] -> True to skip
+        skip_line = {}
+        skip_gen = {}
+        # Line-outage keys l|m
+        for key, s_list in line_pairs.items():
+            try:
+                l_name, m_name = key.split("|", 1)
+            except Exception:
+                continue
+            s_list = _ensure_list_length([float(x) for x in s_list], T, True, 0.0)
+            skip_line[(l_name, m_name)] = s_list
+
+        # Gen-outage keys l|g
+        for key, s_list in gen_pairs.items():
+            try:
+                l_name, g_name = key.split("|", 1)
+            except Exception:
+                continue
+            s_list = _ensure_list_length([float(x) for x in s_list], T, True, 0.0)
+            skip_gen[(l_name, g_name)] = s_list
+
+        stats = {
+            "neighbor": nn_name,
+            "distance": nn_dist,
+            "skipped_line": 0,
+            "skipped_gen": 0,
+        }
+
+        def _predicate(
+            kind: str, line_l, out_obj, t: int, coeff: float, F_em: float
+        ) -> bool:
+            """
+            Return True to include the constraint, False to prune.
+            kind: "line" for line-outage; "gen" for gen-outage
+            """
+            Fthr = thr(F_em)
+            if kind == "line":
+                key = (line_l.name, out_obj.name)
+                s_vec = skip_line.get(key)
+                if s_vec is None:
+                    return True
+                s = float(s_vec[min(max(0, int(t)), T - 1)])
+                if s >= Fthr:
+                    stats["skipped_line"] += 1
+                    return False
+                return True
+            else:
+                key = (line_l.name, out_obj.name)
+                s_vec = skip_gen.get(key)
+                if s_vec is None:
+                    return True
+                s = float(s_vec[min(max(0, int(t)), T - 1)])
+                if s >= Fthr:
+                    stats["skipped_gen"] += 1
+                    return False
+                return True
+
+        return _predicate, stats

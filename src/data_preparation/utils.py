@@ -101,7 +101,7 @@ def _migrate_to_v04(json_: dict) -> None:
         gen.setdefault("Type", "Thermal")
 
 
-def from_json(j: dict) -> UnitCommitmentScenario:
+def from_json(j: dict, quiet: bool = False) -> UnitCommitmentScenario:
     # -- Time grid ---------------------------------------------------------- #
     par = j["Parameters"]
     time_horizon = (
@@ -400,7 +400,9 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     #  Lines                                                                 #
     # ---------------------------------------------------------------------- #
     if "Transmission lines" in j:
-        for idx, (lname, ldict) in enumerate(j["Transmission lines"].items(), start=1):
+        for idx, (lname, ldict) in enumerate(
+            j.get("Transmission lines").items(), start=1
+        ):
             source_name = ldict["Source bus"]
             target_name = ldict["Target bus"]
             if source_name not in name_to_bus or target_name not in name_to_bus:
@@ -530,14 +532,18 @@ def from_json(j: dict) -> UnitCommitmentScenario:
                         DataParams.DEFAULT_STORAGE_MIN_CHARGE_RATE_MW,
                     )
                 ),
-                max_charge=ts(sdict.get("Maximum charge rate (MW)")),
+                max_charge=ts(sdict.get("Maximum charge rate (MW)"))
+                if "Maximum charge rate (MW)" in sdict
+                else ts(DataParams.DEFAULT_STORAGE_MAX_CHARGE_RATE_MW),
                 min_discharge=ts(
                     _scalar(
                         sdict.get("Minimum discharge rate (MW)"),
                         DataParams.DEFAULT_STORAGE_MIN_DISCHARGE_RATE_MW,
                     )
                 ),
-                max_discharge=ts(sdict.get("Maximum discharge rate (MW)")),
+                max_discharge=ts(sdict.get("Maximum discharge rate (MW)"))
+                if "Maximum discharge rate (MW)" in sdict
+                else ts(DataParams.DEFAULT_STORAGE_MAX_DISCHARGE_RATE_MW),
                 initial_level=_scalar(
                     sdict.get("Initial level (MWh)"),
                     DataParams.DEFAULT_STORAGE_INITIAL_LEVEL_MWH,
@@ -585,9 +591,10 @@ def from_json(j: dict) -> UnitCommitmentScenario:
     )
 
     _repair(scenario)
-    print(
-        f"Parsed scenario: {len(buses)} buses, {len(thermal_units)} thermal units, {len(lines)} lines, {len(reserves)} reserves"
-    )
+    if not quiet:
+        print(
+            f"Parsed scenario: {len(buses)} buses, {len(thermal_units)} thermal units, {len(lines)} lines, {len(reserves)} reserves"
+        )
     return scenario
 
 

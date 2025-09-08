@@ -18,8 +18,8 @@ Approach
   * Store s per (l,m,t) and (l,g,t). Positive s = safe slack (redundant candidate).
 - At inference time for a target instance j:
   * Find nearest neighbor i* by Euclidean distance on zscored load vector.
-  * Build a filter predicate that skips a constraint if neighbor margin s >= thr_abs + thr_rel*F_em.
-    Otherwise, keep the constraint.
+  * Build a filter predicate that skips a constraint if neighbor margin s >= thr_rel*F_em.
+    (Absolute thresholds are deprecated and ignored.)
 
 Notes
 - Our SCUC contingency constraints use these same base-case expressions (no explicit redispatch),
@@ -34,6 +34,7 @@ Artifacts
 import json
 import gzip
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set, Callable
@@ -437,18 +438,29 @@ class RedundancyProvider:
 
         return line_pairs, gen_pairs, feats
 
-    def _build_index(self, case_folder: str) -> None:
+    def _build_index(self, case_folder: str, max_items: Optional[int] = None) -> None:
         inputs = self._list_inputs(case_folder)
         outputs = self._list_outputs(case_folder)
         total_inputs = len(inputs)
         total_outputs = len(outputs)
         self._coverage = (total_outputs / total_inputs) if total_inputs > 0 else 0.0
 
+        # Limit outputs if requested (speed lever)
+        if max_items is not None and max_items > 0:
+            outputs = outputs[:max_items]
+
         self._inputs_list = [self._dataset_name_from_input(p) for p in inputs]
         outputs_names = [self._dataset_name_from_output(p) for p in outputs]
+        self._outputs_list = outputs_names
 
+        print(
+            f"[redundancy] Building index for '{case_folder}': using {len(outputs)}/{total_outputs} outputs "
+            f"(coverage={self._coverage:.3f}). This may take a few minutes ..."
+        )
+
+        t0 = time.time()
         idx: Dict[str, dict] = {}
-        for out_path in outputs:
+        for i, out_path in enumerate(outputs, start=1):
             out = _load_output_solution(out_path)
             if not out:
                 continue
@@ -462,13 +474,25 @@ class RedundancyProvider:
                 "line_pairs": line_pairs,
                 "gen_pairs": gen_pairs,
             }
+            if i == 1 or (i % 10 == 0) or (i == len(outputs)):
+                elapsed = time.time() - t0
+                print(
+                    f"[redundancy] processed {i}/{len(outputs)} outputs (elapsed {elapsed:.1f}s)"
+                )
 
         self._index = idx
         self._available = len(self._index) > 0
         self._compute_splits_from_names(sorted(self._index.keys()))
+        t1 = time.time()
+        print(
+            f"[redundancy] Done. Indexed {len(self._index)} item(s) in {t1 - t0:.1f}s."
+        )
 
     def pretrain(
-        self, case_folder: Optional[str] = None, force: bool = False
+        self,
+        case_folder: Optional[str] = None,
+        force: bool = False,
+        max_items: Optional[int] = None,
     ) -> Optional[Path]:
         cf = case_folder or self.case_folder
         if not cf:
@@ -477,7 +501,7 @@ class RedundancyProvider:
         if path.exists() and not force:
             if self._load_index_file(cf):
                 return path
-        self._build_index(cf)
+        self._build_index(cf, max_items=max_items)
         if not self._index:
             return None
         return self._save_index_file(cf)
@@ -523,7 +547,7 @@ class RedundancyProvider:
         scenario,
         instance_name: str,
         *,
-        thr_abs: float = 20.0,
+        thr_abs: float = 20.0,  # deprecated (ignored)
         thr_rel: float = 0.10,
         use_train_index_only: bool = True,
         exclude_self: bool = True,
@@ -531,7 +555,8 @@ class RedundancyProvider:
         """
         Build a filter predicate closure for contingencies.add_constraints.
 
-        A constraint is pruned (skipped) if neighbor margin s >= thr_abs + thr_rel * F_em.
+        A constraint is pruned (skipped) if neighbor margin s >= thr_rel * F_em.
+        Absolute thresholds are deprecated and ignored.
 
         Returns (predicate, stats) or None if no trained index/neighbor.
         stats = {"neighbor": str, "distance": float, "skipped_line": int, "skipped_gen": int}
@@ -565,7 +590,8 @@ class RedundancyProvider:
         line_pairs = nn_item.get("line_pairs", {}) or {}
         gen_pairs = nn_item.get("gen_pairs", {}) or {}
 
-        thr = lambda F_em: float(thr_abs) + float(thr_rel) * float(F_em)
+        # Relative-only threshold
+        thr = lambda F_em: float(thr_rel) * float(F_em)
 
         # Pre-generate skip masks as dict[(lname, oname, t)] -> True to skip
         skip_line = {}
@@ -577,8 +603,6 @@ class RedundancyProvider:
             except Exception:
                 continue
             s_list = _ensure_list_length([float(x) for x in s_list], T, True, 0.0)
-            # We'll compute threshold at call-time (depends on F_em of target scenario)
-            # so here we only store margins per t.
             skip_line[(l_name, m_name)] = s_list
 
         # Gen-outage keys l|g

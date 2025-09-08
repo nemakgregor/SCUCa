@@ -2,21 +2,27 @@
 Benchmark pipeline: compare raw Gurobi vs ML-based (warm-start + redundant-constraint pruning).
 
 What it does:
-- Stage 1 (TRAIN): solve with raw Gurobi, save outputs (skip if --skip-existing).
-- Stage 2: pretrain warm-start index from TRAIN outputs.
-- Stage 2.5 (optional): pretrain redundancy index from TRAIN outputs.
-- Stage 3 (TEST): for each instance, solve RAW and WARM(+optional pruning);
+- Stage 1 (TRAIN): solve with raw Gurobi only for missing outputs; skip instances that
+  already have a JSON in src/data/output (always-on skip for TRAIN).
+- Stage 2: pretrain warm-start index from TRAIN outputs (read from src/data/output).
+- Stage 3 (optional): pretrain redundancy index from TRAIN outputs (read from src/data/output).
+- Stage 4 (TEST): for each instance, solve RAW and WARM(+optional pruning);
   verify feasibility and write:
     • a per-case results CSV under src/data/output/<case>/compare_<tag>_<timestamp>.csv
     • a general logs CSV under src/data/logs/compare_logs_<tag>_<timestamp>.csv
       with (instance, split, method, num vars, num constrs, runtime, max constraint violation, etc.)
+  NOTE: For TEST runs, human-readable logs (solution and verification) are always saved.
 
 Notes:
 - Redundancy pruning controls (all OFF unless you pass --rc-enable):
     --rc-enable               Enable pruning
-    --rc-thr-abs 20.0         Absolute margin threshold [MW]
+    --rc-thr-abs 20.0         Absolute margin threshold [MW] (deprecated; ignored)
     --rc-thr-rel 0.10         Relative margin threshold (fraction of emergency limit)
     --rc-use-train-db         Restrict redundancy k-NN to TRAIN split (default True)
+
+Default logging behavior:
+- General CSV logs are always saved (results CSV per case and general logs CSV under src/data/logs).
+- For TEST runs, we force saving human-readable logs (solution and verification) regardless of --save-logs.
 """
 
 from __future__ import annotations
@@ -92,6 +98,14 @@ def _split_instances(
     return tr, va, te
 
 
+def _count_missing_outputs(names: List[str]) -> Tuple[int, List[str]]:
+    missing: List[str] = []
+    for nm in names:
+        if not compute_output_path(nm).is_file():
+            missing.append(nm)
+    return len(missing), missing
+
+
 @dataclass
 class SolveResult:
     instance_name: str
@@ -112,6 +126,9 @@ class SolveResult:
     num_int_vars: Optional[int] = None
     num_constrs: Optional[int] = None
     max_constraint_violation: Optional[float] = None
+    violations: Optional[str] = (
+        None  # "OK" or space-separated constraint IDs (e.g., "C105 C109")
+    )
 
 
 def _metrics_from_model(
@@ -180,6 +197,30 @@ def _max_constraint_violation(checks) -> Optional[float]:
         except Exception:
             continue
     return max(vals) if vals else 0.0
+
+
+def _violated_constraint_ids(checks) -> Optional[str]:
+    """
+    Return:
+      - "OK" if all constraints (C-xxx) are within tolerance,
+      - space-separated list like "C105 C109" if any constraints are violated,
+      - None if checks list is missing/None.
+    """
+    if not checks:
+        return None
+    ids: List[str] = []
+    for c in checks:
+        try:
+            if isinstance(c.idx, str) and c.idx.startswith("C-"):
+                v = float(c.value)
+                if math.isfinite(v) and v > 1e-6:
+                    ids.append(c.idx.replace("-", ""))  # "C-105" -> "C105"
+        except Exception:
+            continue
+    if not ids:
+        return "OK"
+    # deduplicate and sort for stability
+    return " ".join(sorted(set(ids)))
 
 
 def _save_logs_if_requested(sc, model, save_logs: bool) -> None:
@@ -277,6 +318,7 @@ def _prepare_results_csv(case_folder: str) -> Path:
         "num_int_vars",
         "num_constrs",
         "max_constraint_violation",
+        "violations",  # "OK" or constraint IDs space-separated
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         wr = csv.writer(fh)
@@ -312,6 +354,7 @@ def _append_result_to_csv(csv_path: Path, r: SolveResult) -> None:
                 ""
                 if r.max_constraint_violation is None
                 else f"{float(r.max_constraint_violation):.8f}",
+                "" if r.violations is None else r.violations,
             ]
         )
 
@@ -339,6 +382,7 @@ def _prepare_logs_csv(case_folder: str) -> Path:
         "num_bin_vars",
         "num_int_vars",
         "max_constraint_violation",
+        "violations",  # "OK" or constraint IDs space-separated
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(header)
@@ -365,6 +409,7 @@ def _append_result_to_logs_csv(csv_path: Path, r: SolveResult) -> None:
                 ""
                 if r.max_constraint_violation is None
                 else f"{float(r.max_constraint_violation):.8f}",
+                "" if r.violations is None else r.violations,
             ]
         )
 
@@ -432,6 +477,7 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     ok_dl = _robust_download(
@@ -453,6 +499,7 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     try:
@@ -471,6 +518,7 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     sc = inst.deterministic
@@ -500,12 +548,15 @@ def _solve_raw(
 
     feasible_ok = None
     max_viol = None
+    violations = None
     try:
         feasible_ok, checks, _ = verify_solution(sc, model)
         max_viol = _max_constraint_violation(checks)
+        violations = _violated_constraint_ids(checks)
     except Exception:
         feasible_ok = None
         max_viol = None
+        violations = None
 
     _save_logs_if_requested(sc, model, save_logs)
 
@@ -529,6 +580,7 @@ def _solve_raw(
         num_int_vars=nint,
         num_constrs=ncons,
         max_constraint_violation=max_viol,
+        violations=violations,
     )
 
 
@@ -565,6 +617,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     ok_dl = _robust_download(
@@ -586,6 +639,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     try:
@@ -604,6 +658,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
     sc = inst.deterministic
 
@@ -651,12 +706,15 @@ def _solve_warm(
 
     feasible_ok = None
     max_viol = None
+    violations = None
     try:
         feasible_ok, checks, _ = verify_solution(sc, model)
         max_viol = _max_constraint_violation(checks)
+        violations = _violated_constraint_ids(checks)
     except Exception:
         feasible_ok = None
         max_viol = None
+        violations = None
 
     _save_logs_if_requested(sc, model, save_logs)
 
@@ -680,6 +738,7 @@ def _solve_warm(
         num_int_vars=nint,
         num_constrs=ncons,
         max_constraint_violation=max_viol,
+        violations=violations,
     )
 
 
@@ -726,7 +785,7 @@ def main():
         "--save-logs",
         action="store_true",
         default=False,
-        help="Save human logs to src/data/logs (solution and verification reports)",
+        help="Also save human-readable solution and verification logs (.log) to src/data/logs (TEST saves are always ON regardless of this flag)",
     )
     ap.add_argument(
         "--warm-mode",
@@ -737,8 +796,8 @@ def main():
     ap.add_argument(
         "--skip-existing",
         action="store_true",
-        default=False,
-        help="TRAIN ONLY: skip instances that already have a JSON solution in src/data/output",
+        default=True,
+        help="TRAIN ONLY: skip instances that already have a JSON solution in src/data/output (always recommended)",
     )
     ap.add_argument(
         "--download-attempts",
@@ -763,7 +822,7 @@ def main():
         "--rc-thr-abs",
         type=float,
         default=20.0,
-        help="Absolute margin threshold [MW] to prune a constraint (default 20 MW)",
+        help="Absolute margin threshold [MW] to prune a constraint (deprecated; ignored)",
     )
     ap.add_argument(
         "--rc-thr-rel",
@@ -801,16 +860,22 @@ def main():
     if args.limit_test and args.limit_test > 0:
         test = test[: args.limit_test]
 
+    # Quick report + missing outputs count for TRAIN
+    missing_count, missing_list = _count_missing_outputs(train)
     print(f"Case: {case_folder}")
-    print(f"- Train: {len(train)}")
+    print(f"- Train: {len(train)} (missing outputs: {missing_count})")
     print(f"- Val  : {len(val)}")
     print(f"- Test : {len(test)}")
-    if args.skip_existing:
+    if missing_count > 0:
         print(
-            "Note: --skip-existing applies to TRAIN stage only. TEST runs will re-solve even if outputs exist."
+            "Note: TRAIN stage will solve only missing instances to populate src/data/output."
+        )
+    else:
+        print(
+            "All TRAIN outputs already present in src/data/output; no TRAIN solving needed."
         )
 
-    # Prepare CSVs
+    # Prepare CSVs (always)
     csv_path = _prepare_results_csv(case_folder)
     logs_csv_path = _prepare_logs_csv(case_folder)
     print(f"Results will be appended to: {csv_path}")
@@ -818,7 +883,7 @@ def main():
 
     results: List[SolveResult] = []
 
-    # Stage 1: RAW Train (allow skipping existing)
+    # Stage 1: RAW Train (always skip existing to avoid re-solving)
     print("Stage 1: Solving TRAIN with raw Gurobi (no warm start) ...")
     for nm in train:
         r = _solve_raw(
@@ -826,8 +891,8 @@ def main():
             args.time_limit,
             args.mip_gap,
             split="train",
-            save_logs=args.save_logs,
-            skip_existing=args.skip_existing,
+            save_logs=False,  # no human logs for TRAIN
+            skip_existing=True,  # enforce skip of existing outputs
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,
             rc_provider=None,
@@ -837,9 +902,14 @@ def main():
         _append_result_to_logs_csv(logs_csv_path, r)
         results.append(r)
 
-    # Stage 2: Pretrain warm-start index from outputs (existing solutions are used)
+    # Stage 2: Pretraining warm-start index from TRAIN outputs ...
     print("Stage 2: Pretraining warm-start index from TRAIN outputs ...")
-    wsp = WarmStartProvider(case_folder=case_folder)
+    wsp = WarmStartProvider(
+        case_folder=case_folder,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        split_seed=args.seed,
+    )
     wsp.pretrain(force=True)
     trained, cov = wsp.ensure_trained(case_folder, allow_build_if_missing=False)
     print(f"- Warm-start index: trained={trained}, coverage={cov:.3f}")
@@ -848,11 +918,16 @@ def main():
             "Index not trained (insufficient outputs). Evaluation will still try warm, but coverage may be low."
         )
 
-    # Stage 2.5: Pretrain redundancy index from TRAIN outputs (if enabled)
+    # Stage 3: Redundancy
     rc_provider = None
     if args.rc_enable:
-        print("Stage 2.5: Pretraining redundancy index from TRAIN outputs ...")
-        rc_provider = RCProvider(case_folder=case_folder)
+        print("Stage 3: Pretraining redundancy index from TRAIN outputs ...")
+        rc_provider = RCProvider(
+            case_folder=case_folder,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            split_seed=args.seed,
+        )
         rc_provider.pretrain(force=True)
         ok, rc_cov = rc_provider.ensure_trained(
             case_folder, allow_build_if_missing=False
@@ -862,8 +937,8 @@ def main():
             print("Redundancy index not available. Pruning will be OFF.")
             rc_provider = None
 
-    # Stage 3: Compare on TEST (RAW vs WARM) — always re-solve; ignore skip-existing
-    print("Stage 3: Comparing on TEST (RAW vs WARM) ...")
+    # Stage 4: Compare on TEST (RAW vs WARM) — always re-solve and always save human logs
+    print("Stage 4: Comparing on TEST (RAW vs WARM) ...")
     for nm in test:
         # RAW
         r_raw = _solve_raw(
@@ -871,7 +946,7 @@ def main():
             args.time_limit,
             args.mip_gap,
             split="test",
-            save_logs=args.save_logs,
+            save_logs=True,  # force logs for TEST
             skip_existing=False,
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,
@@ -893,7 +968,7 @@ def main():
             args.mip_gap,
             split="test",
             warm_mode=args.warm_mode,
-            save_logs=args.save_logs,
+            save_logs=True,  # force logs for TEST
             skip_existing=False,
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,

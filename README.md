@@ -109,6 +109,85 @@ python -m src.optimization_model.SCUC_solver.optimizer \
   --time-limit 600 --mip-gap 0.05
 ```
 
+## CLI options reference
+
+The following sections list all CLI options for the two main entry points.
+
+### 1) Solver CLI: src.optimization_model.SCUC_solver.optimizer
+
+Usage:
+- python -m src.optimization_model.SCUC_solver.optimizer [options]
+
+Options:
+- What to solve
+  - --instances NAMES...         Explicit dataset names, e.g., matpower/case14/2017-01-01
+  - --include TOKENS...          Tokens to include in dataset name (e.g., case57)
+  - --limit N                    Solve at most N instances (0 => unlimited)
+
+- Solver controls
+  - --time-limit SECONDS         Gurobi time limit [default: 600]
+  - --mip-gap FLOAT              Gurobi MIP gap [default: 0.05]
+  - --skip-existing              Do not re-solve instances that already have a JSON solution
+  - --dry-run                    List instances and exit (do not solve)
+
+- Warm start (all OFF by default)
+  - --warm                       Enable warm start (generate from pre-trained DB if available)
+  - --require-pretrained         Only use pre-trained warm-start index (do not auto-build)
+  - --warm-mode {fixed,commit-only,as-is}
+                                Warm-start application mode [default: fixed]
+                                Note: fixed maps to "repair" (safer)
+  - --warm-use-train-db          Restrict neighbor search to the training split of the index
+
+- Logs
+  - --save-logs                  Also save human-readable solution and verification logs (.log)
+                                to src/data/logs (general CSV logs are always saved)
+
+Output:
+- JSON solutions under src/data/output mirroring input hierarchy
+- General CSV logs at src/data/logs/optimizer_logs_<timestamp>.csv
+
+### 2) Comparison pipeline: src.optimization_model.SCUC_solver.compare_ml_raw
+
+Usage:
+- python -m src.optimization_model.SCUC_solver.compare_ml_raw [options]
+
+Options:
+- Case and split
+  - --case CASEFOLDER            Required. e.g., matpower/case118
+  - --train-ratio FLOAT          Train ratio [default: 0.70]
+  - --val-ratio FLOAT            Validation ratio; remainder is test [default: 0.15]
+  - --seed INT                   Split seed [default: 42]
+  - --limit-train N              Limit number of TRAIN instances [default: 0 = no limit]
+  - --limit-test N               Limit number of TEST instances [default: 0 = no limit]
+
+- Solver controls (applies to RAW and WARM runs)
+  - --time-limit SECONDS         Time limit [default: 600]
+  - --mip-gap FLOAT              Relative MIP gap [default: 0.05]
+  - --skip-existing              TRAIN ONLY: skip instances that already have a JSON solution
+  - --download-attempts N        Download retry attempts [default: 3]
+  - --download-timeout SECONDS   Per-attempt HTTP timeout [default: 60]
+
+- Warm-start evaluation
+  - --warm-mode {fixed,commit-only,as-is}
+                                Warm-start application mode [default: fixed]
+                                Note: fixed maps to "repair" (safer)
+
+- Redundancy pruning (optional; experimental)
+  - --rc-enable                  Enable ML-based redundant contingency pruning
+  - --rc-thr-rel FLOAT           Relative margin threshold (fraction of F_em) [default: 0.50]
+  - --rc-thr-abs FLOAT           Deprecated; ignored (was absolute MW margin)
+  - --rc-use-train-db            Restrict redundancy k-NN to TRAIN split [default: True]
+
+- Logs
+  - --save-logs                  Save human-readable solution and verification logs (.log)
+                                to src/data/logs (general CSV logs are always saved)
+
+Outputs:
+- Per-case results CSV at src/data/output/<case>/compare_<tag>_<timestamp>.csv
+  - Includes a "violations" column: "OK" if no constraint violated, otherwise space-separated constraint IDs (e.g., "C105 C109")
+- General logs CSV at src/data/logs/compare_logs_<tag>_<timestamp>.csv
+  - Also includes the "violations" column
+
 ## What gets downloaded and where
 
 Instances are fetched on demand from:
@@ -141,6 +220,7 @@ Example mapping:
   - scuc_model_builder.py: builds a segmented SCUC by composing modular components
   - optimizer.py: simple solver CLI (all options OFF by default, logs OFF by default)
   - compare_warm_start.py: pipeline to benchmark warm-start vs raw on train/test splits
+  - compare_ml_raw.py: pipeline to evaluate raw vs warm and export CSVs (this doc lists all its CLI options)
   - solve_instances.py: batch solver (remote listing, download, solve, JSON save)
   - fix_warm_start.py (in ml_models): repair/generate robust warm-start JSONs
 - src/ml_models
@@ -148,4 +228,4 @@ Example mapping:
   - pretrain_warm_start.py: convenience tool to prebuild per-case indexes
 - src/optimization_model/helpers
   - save_json_solution.py: serialize solutions as JSON under src/data/output
-  - verify_solution.py: verify model solution (now with in-memory verification function) and write a report if requested
+  - verify_solution.py: verify model solution (in-memory) and write a report if requested
