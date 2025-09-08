@@ -3,7 +3,11 @@
   "case_folder": "matpower/case57",
   "neighbor": "matpower/case57/2017-04-04",
   "distance": 0.7189481912903631,
+<<<<<<< HEAD
   "coverage": 0.7403314917127072,
+=======
+  "coverage": 1.0,
+>>>>>>> 3ff62f3d783bcd72ae0493a03a134a90c2f6bddb
   "generators": {
     "g1": {
       "initial_status_steps": 24,

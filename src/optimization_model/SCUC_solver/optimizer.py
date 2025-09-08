@@ -1,6 +1,9 @@
 import argparse
+import argparse
 import logging
 from datetime import datetime
+from typing import List, Optional, Tuple
+
 from typing import List, Optional, Tuple
 
 from gurobipy import GRB
@@ -14,6 +17,10 @@ from src.optimization_model.helpers.save_json_solution import (
     save_solution_as_json,
     compute_output_path,
 )
+from src.optimization_model.helpers.save_json_solution import (
+    save_solution_as_json,
+    compute_output_path,
+)
 from src.data_preparation.params import DataParams
 
 # Warm-start provider and instance listers
@@ -23,7 +30,18 @@ from src.optimization_model.SCUC_solver.solve_instances import (
     list_local_cached_instances,
 )
 
+# Warm-start provider and instance listers
+from src.ml_models.warm_start import WarmStartProvider
+from src.optimization_model.SCUC_solver.solve_instances import (
+    list_remote_instances,
+    list_local_cached_instances,
+)
+
 logging.basicConfig(level=logging.INFO)
+
+logging.getLogger("gurobipy").setLevel(logging.WARNING)
+logging.getLogger("gurobipy").propagate = False
+
 
 logging.getLogger("gurobipy").setLevel(logging.WARNING)
 logging.getLogger("gurobipy").propagate = False
@@ -147,9 +165,12 @@ def _solve_one(
         pass
 
     # Optimize
+    # Optimize
     model.optimize()
     logger.info("Solver status: %s", _status_str(model.Status))
+    logger.info("Solver status: %s", _status_str(model.Status))
 
+    # Save JSON solution (used as training data and for later analysis)
     # Save JSON solution (used as training data and for later analysis)
     if model.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
         try:
