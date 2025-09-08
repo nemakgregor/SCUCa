@@ -1,0 +1,2 @@
+PS C:\Users\egor1\Desktop\Energy\SCUC\SCUCa> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser 
+PS C:\Users\egor1\Desktop\Energy\SCUC\SCUCa> . .\SCUC\Scripts\Activate.ps1

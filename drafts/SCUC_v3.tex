@@ -1,0 +1,316 @@
+\documentclass[12pt, a4paper]{article}
+
+% Preamble: Load necessary packages for formatting
+\usepackage{amsmath, amsfonts, amssymb} % For advanced math typesetting
+\usepackage{geometry} % For setting page margins
+\usepackage{url} % For formatting URLs in the bibliography
+
+% Set page geometry
+\geometry{a4paper, margin=1in}
+
+\begin{document}
+
+\begin{abstract}
+This document provides a comprehensive mathematical formulation for the Security-Constrained Unit Commitment (SCUC) problem. The model is presented as a Mixed-Integer Linear Program (MILP) designed to minimize total system operational costs while adhering to a wide range of physical, operational, and security constraints. It includes detailed models for thermal generators, profiled generators (renewables), and energy storage units. Special emphasis is given to the formulation of transmission network constraints, presenting both the B-Theta (voltage angle) method and the more advanced Shift Factor (PTDF/LODF) method for ensuring N-1 security. The formulation is presented with unique equation numbering, integrated scientific explanations, and descriptions of calculations. An appendix details the sources of input data and the mathematical derivation of key network parameters.
+\end{abstract}
+
+\section{Nomenclature}
+
+\subsection{Sets}
+\begin{itemize}
+\item $T$: Set of time periods in the planning horizon.
+\item $G^{\text{Thermal}}$: Set of thermal generators.
+\item $G^{\text{Profiled}}$: Set of profiled (renewable) generators.
+\item $S$: Set of energy storage units.
+\item $B$: Set of buses in the network.
+\item $L$: Set of transmission lines.
+\item $K_g$: Set of piecewise-linear cost segments for thermal generator $g$.
+\item $M_g$: Set of startup cost categories for thermal generator $g$.
+\item $R$: Set of reserve requirements (e.g., spinning reserves).
+\item $G_r$: Subset of thermal generators eligible to provide reserve $r$.
+\end{itemize}
+
+\subsection{Parameters}
+\begin{itemize}
+\item $P_g^{\min}, P_g^{\max}$: Minimum and maximum power output for thermal generator $g$ (MW).
+\item $C_g^{\min}$: No-load or minimum power cost for thermal generator $g$ (\$/period).
+\item $C_{g,k}$: Marginal cost of segment $k$ for thermal generator $g$ (\$/MW).
+\item $P_{g,k}$: Power breakpoint for segment $k$ of thermal generator $g$ (MW).
+\item $S_{g,m}$: Startup cost for category $m$ of thermal generator $g$ (\$).
+\item $D_{g,m}$: Downtime delay threshold for startup category $m$ (periods).
+\item $R_g^{\text{up}}, R_g^{\text{down}}$: Ramp-up and ramp-down rates for thermal generator $g$ (MW/period).
+\item $SU_g, SD_g$: Startup and shutdown power limits for thermal generator $g$ (MW).
+\item $UT_g, DT_g$: Minimum up and down times for thermal generator $g$ (periods).
+\item $\text{initial status}_g$: Initial commitment status duration for thermal generator $g$ (periods).
+\item $\text{initial power}_g$: Initial power output for thermal generator $g$ (MW).
+\item $\text{must run}_{g,t}$: Must-run flag for thermal generator $g$ at time $t$ (binary).
+\item $P_{g,t}^{\min}, P_{g,t}^{\max}$: Minimum and maximum power for profiled generator $g$ at time $t$ (MW).
+\item $C_{g,t}$: Marginal cost for profiled generator $g$ at time $t$ (\$/MW).
+\item $L_{s,t}^{\min}, L_{s,t}^{\max}$: Minimum and maximum energy levels for storage $s$ at time $t$ (MWh).
+\item $R_{s,t}^{\min\_charge}, R_{s,t}^{\max\_charge}$: Minimum and maximum charging rates for storage $s$ at time $t$ (MW).
+\item $R_{s,t}^{\min\_discharge}, R_{s,t}^{\max\_discharge}$: Minimum and maximum discharging rates for storage $s$ at time $t$ (MW).
+\item $\eta_{s,t}^{\text{charge}}, \eta_{s,t}^{\text{discharge}}$: Charging and discharging efficiencies for storage $s$ at time $t$.
+\item $\lambda_s$: Loss factor for storage $s$ (fraction/period).
+\item $C_{s,t}^{\text{charge}}, C_{s,t}^{\text{discharge}}$: Charging cost and discharging revenue for storage $s$ at time $t$ (\$/MW).
+\item $D_{b,t}$: Load demand at bus $b$ at time $t$ (MW).
+\item $R_t$: Reserve requirement at time $t$ (MW).
+\item $B_l$: Susceptance of transmission line $l$ (S).
+\item $F_{l,t}^{\text{normal}}, F_{l,t}^{\text{emergency}}$: Normal and emergency flow limits for line $l$ at time $t$ (MW).
+\item $\text{PTDF}_{l,b}$: Power Transfer Distribution Factor for line $l$ and bus $b$.
+\item $\text{LODF}_{l,c}$: Line Outage Distribution Factor for monitored line $l$ and contingent line $c$.
+\item $\text{time\_step}$: Duration of each time period (hours).
+\item $\pi^{\text{reserve}}, \pi^{\text{balance}}, \pi^{\text{flow}}$: Penalty costs for reserve shortfall, power imbalance, and flow violations (\$/MW).
+\end{itemize}
+
+\subsection{Variables}
+\begin{itemize}
+\item $x_{g,t}$: Binary commitment status for thermal generator $g$ at time $t$.
+\item $p_{g,t}$: Power output for generator $g$ at time $t$ (MW).
+\item $y_{g,t,k}$: Power in segment $k$ for thermal generator $g$ at time $t$ (MW).
+\item $u_{g,t}, w_{g,t}$: Binary startup and shutdown indicators for thermal generator $g$ at time $t$.
+\item $u_{g,t,m}$: Binary startup in category $m$ for thermal generator $g$ at time $t$.
+\item $r_{g,t}$: Reserve provided by thermal generator $g$ at time $t$ (MW).
+\item $l_{s,t}$: Energy level in storage $s$ at time $t$ (MWh).
+\item $c_{s,t}, d_{s,t}$: Charging and discharging power for storage $s$ at time $t$ (MW).
+\item $z_{s,t}$: Binary charge/discharge mode for storage $s$ at time $t$.
+\item $\theta_{b,t}$: Voltage angle at bus $b$ at time $t$ (radians).
+\item $s_{t}^{\text{reserve}}$: Reserve shortfall at time $t$ (MW).
+\item $s_{b,t}^{\text{balance}}$: Power balance slack at bus $b$ at time $t$ (MW).
+\item $s_{l,t}^{\text{flow}+}, s_{l,t}^{\text{flow}-}$: Positive and negative flow violation slacks for line $l$ at time $t$ (MW).
+\end{itemize}
+
+\section{Objective Function}
+The objective of the SCUC problem is to minimize the total operational cost of the power system over a given planning horizon. This objective function, formulated as a summation of distinct economic components, drives the optimization towards the most economically efficient schedule that satisfies all operational and security requirements \cite{Wood2013}. The total cost to be minimized is expressed as:
+\begin{align}
+\min \quad & \sum_{t \in T} \sum_{g \in G^{\text{Thermal}}} \left( C_g^{\min} x_{g,t} + \sum_{k \in K_g} C_{g,k} y_{g,t,k} + \sum_{m \in M_g} S_{g,m} u_{g,t,m} \right) \label{eq:obj_thermal} \\
+& + \sum_{t \in T} \sum_{g \in G^{\text{Profiled}}} C_{g,t} p_{g,t} \label{eq:obj_profiled} \\
+& + \sum_{t \in T} \sum_{s \in S} \left( C_{s,t}^{\text{charge}} c_{s,t} - C_{s,t}^{\text{discharge}} d_{s,t} \right) \label{eq:obj_storage} \\
+& + \sum_{t \in T} \pi^{\text{reserve}} s_{t}^{\text{reserve}} + \sum_{t \in T} \sum_{b \in B} \pi^{\text{balance}} s_{b,t}^{\text{balance}} + \sum_{t \in T} \sum_{l \in L} \pi^{\text{flow}} s_{l,t}^{\text{flow}} \label{eq:obj_penalty}
+\end{align}
+The first component in line \eqref{eq:obj_thermal} represents the total cost of operating thermal generators. This includes the no-load or minimum power cost ($C_g^{\min} x_{g,t}$), calculated as the fixed cost at the minimum generation level when the unit is committed; the variable production cost, modeled as a piecewise-linear function ($\sum C_{g,k} y_{g,t,k}$), where each segment's marginal cost $C_{g,k}$ is derived as the slope between consecutive breakpoints in the production cost curve (i.e., $C_{g,k} = (C_{g,k} - C_{g,k-1}) / (P_{g,k} - P_{g,k-1})$); and the startup costs ($\sum S_{g,m} u_{g,t,m}$), where multiple categories $m$ allow for downtime-dependent costs, with $S_{g,m}$ directly from input data and $u_{g,t,m}$ selecting the appropriate category based on prior shutdown duration. Line \eqref{eq:obj_profiled} captures the marginal cost of dispatching profiled generators, such as wind and solar, often zero but representing market offers if provided. The economics of energy storage are modeled in line \eqref{eq:obj_storage}, accounting for charging costs and discharging revenues to enable arbitrage. Finally, line \eqref{eq:obj_penalty} applies high penalty costs to slack variables for reserve shortfalls, power imbalances, and flow limit violations, making them economically prohibitive to enforce constraints softly.
+
+\section{Constraints}
+
+\subsection{Thermal Generator Constraints}
+The operational characteristics of conventional thermal power plants are governed by a set of constraints modeling their physical and mechanical limitations.
+\begin{subequations}
+\begin{align}
+& P_{g}^{\min} x_{g,t} \leq p_{g,t} \leq P_{g}^{\max} x_{g,t} && \forall g \in G^{\text{Thermal}}, t \in T \label{eq:gen_power_limits}
+\end{align}
+Equation \eqref{eq:gen_power_limits} is the fundamental power limit constraint, linking the binary commitment decision ($x_{g,t}$) to the continuous power output ($p_{g,t}$). It ensures that if a generator is off ($x_{g,t}=0$), its power output is zero; if it is on ($x_{g,t}=1$), its output is bounded by its minimum stable generation level ($P_g^{\min}$) and maximum capacity ($P_g^{\max}$), both directly from the production cost curve endpoints.
+
+\begin{align}
+& p_{g,t} = P_{g}^{\min} x_{g,t} + \sum_{k \in K_g} y_{g,t,k} && \forall g \in G^{\text{Thermal}}, t \in T \label{eq:pwl_sum} \\
+& 0 \leq y_{g,t,k} \leq (P_{g,k} - P_{g,k-1}) x_{g,t} && \forall g \in G^{\text{Thermal}}, t \in T, k \in K_g \label{eq:pwl_bounds}
+\end{align}
+To accurately model the generator's non-linear cost curve, equations \eqref{eq:pwl_sum} and \eqref{eq:pwl_bounds} implement a piecewise-linear approximation. The former decomposes the total power output into the minimum generation level plus the sum of outputs from each cost segment ($y_{g,t,k}$); the latter limits the power in each segment to its width ($P_{g,k} - P_{g,k-1}$), scaled by commitment status.
+
+\begin{align}
+& p_{g,t} - p_{g,t-1} \leq \min(R_{g}^{\text{up}}, SU_g) \cdot \text{time\_step} && \forall g \in G^{\text{Thermal}}, t \in T, t>1 \label{eq:ramp_up} \\
+& p_{g,t-1} - p_{g,t} \leq \min(R_{g}^{\text{down}}, SD_g) \cdot \text{time\_step} && \forall g \in G^{\text{Thermal}}, t \in T, t>1 \label{eq:ramp_down}
+\end{align}
+The ramping constraints in \eqref{eq:ramp_up} and \eqref{eq:ramp_down} model the physical inertia of large turbines. They limit the rate of change of power generation between consecutive time periods to the minimum of the unit's ramp rate ($R_g^{\text{up/down}}$) and startup/shutdown limits ($SU_g/SD_g$), scaled by the time step duration.
+
+\begin{align}
+& \sum_{\tau = t - UT_{g} + 1}^{t} u_{g,\tau} \leq x_{g,t} && \forall g \in G^{\text{Thermal}}, t \geq UT_g \label{eq:min_up} \\
+& \sum_{\tau = t - DT_{g} + 1}^{t} w_{g,\tau} \leq 1 - x_{g,t} && \forall g \in G^{\text{Thermal}}, t \geq DT_g \label{eq:min_down}
+\end{align}
+Equations \eqref{eq:min_up} and \eqref{eq:min_down} enforce minimum uptime ($UT_g$) and downtime ($DT_g$) requirements by summing startup/shutdown indicators over rolling windows and bounding them by the commitment status.
+
+\begin{align}
+& u_{g,t} - w_{g,t} = x_{g,t} - x_{g,t-1} && \forall g \in G^{\text{Thermal}}, t \in T, t>1 \label{eq:su_sd_logic} \\
+& u_{g,t} + w_{g,t} \leq 1 && \forall g \in G^{\text{Thermal}}, t \in T \label{eq:su_sd_exclusive}
+\end{align}
+The logical constraints \eqref{eq:su_sd_logic} and \eqref{eq:su_sd_exclusive} link commitment changes to startup/shutdown events, ensuring $u_{g,t}=1$ only on on-transitions and $w_{g,t}=1$ on off-transitions, with no simultaneous events.
+
+\begin{align}
+& u_{g,t} = \sum_{m \in M_g} u_{g,t,m} && \forall g \in G^{\text{Thermal}}, t \in T \label{eq:startup_category_sum} \\
+& \sum_{\tau=t - D_{g,m} + 1}^{t-1} (1 - x_{g,\tau}) \geq D_{g,m-1} u_{g,t,m} && \forall g \in G^{\text{Thermal}}, t \in T, m > 1 \label{eq:startup_category_select}
+\end{align}
+For multi-category startups, \eqref{eq:startup_category_sum} aggregates category-specific startups, and \eqref{eq:startup_category_select} selects the category $m$ based on prior downtime exceeding the lower threshold $D_{g,m-1}$ but not $D_{g,m}$, where $D_{g,m}$ are sorted delay steps. This calculation determines the applicable startup cost based on how long the unit has been offline.
+
+\begin{align}
+& x_{g,0} = 1 && \text{if } \text{initial status}_g > 0, && \forall g \in G^{\text{Thermal}} \label{eq:initial_commit} \\
+& p_{g,0} = \text{initial power}_g && \forall g \in G^{\text{Thermal}} \label{eq:initial_power} \\
+& x_{g,t} = 1 && \text{if } \text{must run}_{g,t} = \text{True}, && \forall g \in G^{\text{Thermal}},\ \forall t \in T \label{eq:must_run}
+\end{align}
+Initial conditions are enforced by \eqref{eq:initial_commit} and \eqref{eq:initial_power}, fixing pre-horizon status and power. Must-run requirements are added via \eqref{eq:must_run}, ensuring the unit remains committed in specified periods.
+\end{subequations}
+
+\subsection{Profiled Generator Constraints}
+\begin{align}
+& P_{g,t}^{\min} \leq p_{g,t} \leq P_{g,t}^{\max} && \forall g \in G^{\text{Profiled}}, t \in T \label{eq:profiled_limits}
+\end{align}
+The constraint in \eqref{eq:profiled_limits} governs the output of profiled resources like wind and solar. Their maximum available power ($P_{g,t}^{\max}$) is determined by an external forecast. This inequality ensures their dispatched power ($p_{g,t}$) does not exceed what is available, allowing for curtailment if necessary.
+
+\subsection{Energy Storage Constraints}
+\begin{subequations}
+\begin{align}
+& l_{s,t} = l_{s,t-1} (1 - \lambda_s) + \left( \eta_{s,t}^{\text{charge}} c_{s,t} - \frac{d_{s,t}}{\eta_{s,t}^{\text{discharge}}} \right) \cdot \text{time\_step} && \forall s \in S, t \in T, t>1 \label{eq:storage_balance}
+\end{align}
+Equation \eqref{eq:storage_balance} calculates the state-of-charge by updating the previous level (adjusted for self-discharge loss $\lambda_s$) with the net energy input/output, scaled by efficiencies and time step. This inter-temporal link enables energy shifting across periods.
+
+\begin{align}
+& L_{s,t}^{\min} \leq l_{s,t} \leq L_{s,t}^{\max} && \forall s \in S, t \in T \label{eq:storage_level_limits} \\
+& R_{s,t}^{\min\_charge} \leq c_{s,t} \leq R_{s,t}^{\max\_charge} && \forall s \in S, t \in T \label{eq:storage_charge_limits} \\
+& R_{s,t}^{\min\_discharge} \leq d_{s,t} \leq R_{s,t}^{\max\_discharge} && \forall s \in S, t \in T \label{eq:storage_discharge_limits}
+\end{align}
+These inequalities enforce physical bounds on energy storage levels and charge/discharge rates, preventing overcharge or depletion.
+
+\begin{align}
+& c_{s,t} \leq R_{s,t}^{\text{max\_charge}} \cdot z_{s,t} && \forall s \in S, t \in T \label{eq:storage_simul_charge} \\
+& d_{s,t} \leq R_{s,t}^{\text{max\_discharge}} \cdot (1 - z_{s,t}) && \forall s \in S, t \in T \label{eq:storage_simul_discharge}
+\end{align}
+These constraints use the binary variable $z_{s,t}$ to enforce mutual exclusivity between charging and discharging modes in each period, reflecting hardware limitations in most storage systems.
+\end{subequations}
+
+\subsection{System-Wide and Security Constraints}
+\begin{subequations}
+\begin{align}
+& \sum_{g \in G, g.\text{bus}=b} p_{g,t} + \sum_{s \in S, s.\text{bus}=b} (d_{s,t} - c_{s,t}) - \sum_{l \in L} \text{Flow}_{l,b,t} = D_{b,t} - s_{b,t}^{\text{balance}} && \forall b \in B, t \in T \label{eq:power_balance}
+\end{align}
+The nodal power balance equation \eqref{eq:power_balance} mandates that injected power (generation + discharge) minus withdrawn power (load + charge + outgoing flows) equals zero at each bus, with a slack variable for imbalances penalized in the objective.
+
+\begin{align}
+& \sum_{g \in G_r} r_{g,t} \geq R_{t} - s_{t}^{\text{reserve}} && \forall t \in T, r \in R \label{eq:reserve_req} \\
+& r_{g,t} \leq P_{g}^{\max} - p_{g,t} && \forall g \in G_r, t \in T \label{eq:reserve_limit}
+\end{align}
+Reserves are summed over eligible units $G_r$ (from input data), ensuring the total meets the requirement $R_t$ with shortfall slack, and limited by each unit's headroom (available capacity above scheduled power).
+\end{subequations}
+
+\subsubsection{Transmission Security: B-Theta Formulation} \label{sec:btheta}
+This is a classic "DC power flow" approximation that uses bus voltage angles as explicit variables.
+\begin{subequations}
+\begin{align}
+& -F_{l,t}^{\text{normal}} \leq B_{l} (\theta_{i,t} - \theta_{j,t}) \leq F_{l,t}^{\text{normal}} && \forall l=(i,j) \in L, t \in T \label{eq:btheta_base} \\
+& \theta_{b_{\text{ref}},t} = 0 && \forall t \in T \label{eq:btheta_ref}
+\end{align}
+In this formulation, equation \eqref{eq:btheta_base} models the power flow on a line as being proportional to the difference in voltage angles ($\theta$) at its terminal buses, scaled by the line's susceptance ($B_l$), and constrains this flow to be within the line's normal thermal limit. Equation \eqref{eq:btheta_ref} sets the angle of a reference bus to zero to provide a fixed reference for the system.
+\end{subequations}
+
+\subsubsection{Transmission Security: Shift Factor (PTDF/LODF) Formulation} \label{sec:ptdf}
+This advanced formulation uses pre-computed sensitivity factors to model network flows efficiently, which is essential for SCUC. The derivation of these factors is detailed in Appendix \ref{app:data}.
+\begin{align}
+& P_{\text{net},b,t} = \left(\sum_{g \in G, g.\text{bus}=b} p_{g,t} + \sum_{s \in S, s.\text{bus}=b} (d_{s,t} - c_{s,t})\right) - D_{b,t} && \forall b \in B, t \in T \label{eq:net_injection}
+\end{align}
+First, equation \eqref{eq:net_injection} defines the net power injection at each bus, consolidating all generation, storage activity, and demand into a single term per bus. This simplifies subsequent flow calculations by aggregating nodal contributions.
+\begin{subequations}
+\begin{align}
+& -F_{l,t}^{\text{normal}} + s_{l,t}^{\text{flow}-} \geq \sum_{b \in B} \text{PTDF}_{l,b} \cdot P_{\text{net},b,t} \geq F_{l,t}^{\text{normal}} - s_{l,t}^{\text{flow}+} && \forall l \in L, t \in T \label{eq:ptdf_base}
+\end{align}
+The base-case transmission constraint is then expressed in \eqref{eq:ptdf_base} using Power Transfer Distribution Factors (PTDFs). A PTDF is a sensitivity factor that quantifies the change in power flow on line $l$ resulting from a 1 MW injection at bus $b$ (and withdrawal at the reference bus) \cite{Christie2000}. This equation uses the principle of superposition to calculate the total flow on line $l$ as the sum of impacts from all nodal net injections, bounded by normal limits with slacks for violations.
+
+\begin{align}
+& \begin{aligned}
+-F_{l,t}^{\text{emergency}} \leq & \left( \sum_{b \in B} \text{PTDF}_{l,b} \cdot P_{\text{net},b,t} \right) \\ 
+& + \text{LODF}_{l,c} \cdot \left( \sum_{b \in B} \text{PTDF}_{c,b} \cdot P_{\text{net},b,t} \right) \leq F_{l,t}^{\text{emergency}}
+\end{aligned} && \forall l,c \in L, l \neq c, t \in T \label{eq:lodf_contingency}
+\end{align}
+Finally, equation \eqref{eq:lodf_contingency} represents the N-1 security constraint, the cornerstone of the SCUC model. It uses Line Outage Distribution Factors (LODFs) to ensure the system remains secure after the failure of any single line $c$ \cite{Tejada2018}. An LODF quantifies how the pre-outage flow on the failed line $c$ redistributes onto a monitored line $l$. This equation calculates the post-contingency flow on line $l$ by adding its base-case flow (first term) to the redistributed flow from the failed line $c$ (second term), and ensures this new flow does not exceed the line's emergency rating.
+\end{subequations}
+
+\appendix
+\section{Data Sourcing and Parameter Derivation} \label{app:data}
+The parameters used in the SCUC model are sourced from a variety of public and private datasets, or are derived from fundamental network properties.
+
+\subsection{Generator, Load, and System Data}
+\begin{itemize}
+    \item \textbf{Generator Data:} Physical parameters such as power limits, ramp rates, and minimum up/down times are typically provided by generator owners. Cost data, including startup costs and piecewise-linear production cost curves, are derived from market offers submitted by generation companies to the Independent System Operator (ISO) \cite{CAISO2009}, \cite{PJMData}.
+    \item \textbf{Load Forecast Data:} Nodal load forecasts ($D_{b,t}$) are produced by ISOs using sophisticated statistical models that incorporate historical load, weather forecasts, and economic activity \cite{LoadForecast2020}. Publicly available forecast data can often be obtained from ISO websites such as ERCOT and PJM \cite{ERCOTData}, \cite{PJMData}.
+    \item \textbf{Network Data:} The transmission network topology, including bus connections and the electrical properties (reactance, resistance) of lines, is maintained by the ISO. Thermal ratings for lines ($F_{l}^{\text{normal}}, F_{l}^{\text{emergency}}$) are also determined by the transmission owners.
+\end{itemize}
+
+\subsection{Derivation of Shift Factors}
+The PTDF and LODF matrices are not primary data but are pre-calculated sensitivity factors derived from the network's physical topology and impedances, based on the DC power flow approximation \cite{Christie2000}.
+
+\subsubsection{Power Transfer Distribution Factors (PTDFs)}
+The PTDF matrix is derived from the bus admittance matrix of the network. The DC power flow model provides a linear relationship between the vector of bus power injections $\mathbf{P}$ and the vector of bus voltage angles $\boldsymbol{\theta}$:
+\begin{align}
+\mathbf{P} = \mathbf{B'} \boldsymbol{\theta} \label{eq:dc_pf}
+\end{align}
+where $\mathbf{B'}$ is the DC bus admittance matrix, with the row and column corresponding to a reference (slack) bus removed. By inverting this matrix, we obtain the bus reactance matrix $\mathbf{X} = (\mathbf{B'})^{-1}$.
+
+The power flow on a line $l$ from bus $i$ to bus $j$ with reactance $x_l$ is $F_l = (1/x_l) (\theta_i - \theta_j)$. The PTDF for line $l$ with respect to a power injection at bus $b$ and withdrawal at the reference bus can be calculated directly from the reactance matrix \cite{Guver2006}:
+\begin{align}
+\text{PTDF}_{l,b} = \frac{1}{x_l} (X_{ib} - X_{jb}) \label{eq:ptdf_calc}
+\end{align}
+This calculation is performed for each line-bus pair, resulting in a matrix used to compute flows as linear combinations of net injections.
+
+\subsubsection{Line Outage Distribution Factors (LODFs)}
+The LODF for a monitored line $l$ with respect to the outage of a contingent line $c$ (connecting buses $m$ and $n$), denoted $\text{LODF}_{l,c}$, is the fraction of the pre-outage flow on line $c$ that is redistributed onto line $l$. LODFs can be calculated directly from the PTDF matrix without re-solving the power flow for each contingency. The formula is given by \cite{Guo2009}, \cite{Ronellenfitsch2017}:
+\begin{align}
+\text{LODF}_{l,c} = \frac{\text{PTDF}_{l,(m,n)}}{1 - \text{PTDF}_{c,(m,n)}} \label{eq:lodf_calc}
+\end{align}
+where $\text{PTDF}_{l,(m,n)}$ is the PTDF on line $l$ for a 1 MW transfer between the terminal buses of the outaged line $c$. This pre-computation, as implemented in the accompanying code, enables efficient enforcement of N-1 security constraints.
+
+\begin{thebibliography}{99}
+
+\bibitem{Xavier2024}
+A. S. Xavier, A. M. Kazachkov, O. Yurdakul, J. He, and F. Qiu, ``UnitCommitment.jl: A Julia/JuMP Optimization Package for Security-Constrained Unit Commitment (Version 0.4),'' \emph{Zenodo}, 2024. [Online]. Available: \url{https://doi.org/10.5281/zenodo.4269874}
+
+\bibitem{Wood2013}
+A. J. Wood, B. F. Wollenberg, and G. B. Sheblé, \emph{Power Generation, Operation, and Control}, 3rd ed. Hoboken, NJ, USA: John Wiley \& Sons, 2013.
+
+\bibitem{Tejada2018}
+D. A. Tejada-Arango, P. Sánchez-Martín, and A. Ramos, ``Security constrained unit commitment using line outage distribution factors,'' \emph{IEEE Transactions on Power Systems}, vol. 33, no. 1, pp. 329--337, Jan. 2018.
+
+\bibitem{Christie2000}
+R. D. Christie, B. F. Wollenberg, and I. Wangensteen, ``Transmission management in the deregulated environment,'' \emph{Proceedings of the IEEE}, vol. 88, no. 2, pp. 170--195, Feb. 2000.
+
+\bibitem{Merlin1983}
+A. Merlin and P. Sandrin, ``A new method for unit commitment at Electricite de France,'' \emph{IEEE Transactions on Power Apparatus and Systems}, vol. PAS-102, no. 5, pp. 1218--1225, May 1983.
+
+\bibitem{Guo2009}
+J. Guo and L. Mili, ``Direct calculation of line outage distribution factors,'' \emph{IEEE Transactions on Power Systems}, vol. 24, no. 3, pp. 1633--1634, Aug. 2009.
+
+\bibitem{Ronellenfitsch2017}
+H. Ronellenfitsch, D. Manik, J. Horsch, T. Brown, and D. Witthaut, ``A cycle-based approach to calculating power transfer distribution factors,'' \emph{IEEE Transactions on Power Systems}, vol. 32, no. 2, pp. 1255--1264, Mar. 2017.
+
+\bibitem{Guver2006}
+T. Guler, G. Gross, and M. Liu, ``Generalized line outage distribution factors,'' \emph{IEEE Power Engineering Society General Meeting}, 2006.
+
+\bibitem{CAISO2009}
+California ISO, ``Technical Bulletin: Market Optimization Details,'' Nov. 2009. [Online]. Available: \url{https://www.caiso.com/Documents/TechnicalBulletin-MarketOptimizationDetails.pdf}
+
+\bibitem{PJMData}
+PJM Interconnection, ``Data Viewer,'' 2025. [Online]. Available: \url{https://dataviewer.pjm.com/dataviewer/pages/public/load.jsf}
+
+\bibitem{LoadForecast2020}
+IBM, ``Load Forecasting,'' 2020. [Online]. Available: \url{https://www.ibm.com/think/topics/load-forecasting}
+
+\bibitem{ERCOTData}
+Electric Reliability Council of Texas, ``Load Forecast,'' 2025. [Online]. Available: \url{https://www.ercot.com/gridinfo/load/forecast}
+
+\bibitem{Xie2022}
+J. Xie et al., ``Security-Constrained Unit Commitment for Electricity Market: Modeling, Solution Methods, and Future Challenges,'' \emph{IEEE Transactions on Power Systems}, vol. 38, no. 3, pp. 2173--2189, May 2023.
+
+\bibitem{Alqurashi2017}
+A. Alqurashi et al., ``Security Constrained Unit Commitment (SCUC) formulation and its solving methodology,'' \emph{Journal of King Saud University - Engineering Sciences}, vol. 29, no. 4, pp. 339--346, Oct. 2017.
+
+\bibitem{Xie2022b}
+J. Xie et al., ``Security-Constrained Unit Commitment for Electricity Market: Modeling, Solution Methods, and Future Challenges,'' \emph{NREL Technical Report}, 2022.
+
+\bibitem{Sharma2023}
+S. Sharma and S. Chansareewittaya, ``Security-constrained unit commitment: A decomposition approach solving single-period models,'' \emph{European Journal of Operational Research}, vol. 312, no. 2, pp. 639--653, 2023.
+
+\bibitem{Atakan2019}
+S. Atakan et al., ``Learning to Solve Large-Scale Security-Constrained Unit Commitment Problems,'' \emph{arXiv preprint arXiv:1902.01697}, 2019.
+
+\bibitem{Castelli}
+M. Castelli et al., ``Solving the Security Constrained Unit Commitment problem using Integer Linear Programming,'' \emph{Technical Report}, Carnegie Mellon University.
+
+\bibitem{Xie2022c}
+J. Xie et al., ``Security-Constrained Unit Commitment for Electricity Market: Modeling, Solution Methods, and Future Challenges,'' \emph{NREL Technical Report}, 2022.
+
+\bibitem{McCalley}
+J. McCalley et al., ``Security Constrained Economic Dispatch Calculation,'' Iowa State University Notes.
+
+\bibitem{Pan2016}
+K. Pan and Y. Guan, ``Adaptive Robust Optimization for the Security Constrained Unit Commitment Problem,'' \emph{MIT Sloan Working Paper}, 2016.
+
+\bibitem{Abunima2021}
+H. Abunima et al., ``A Comprehensive Review of Security-constrained Unit Commitment,'' \emph{Journal of Modern Power Systems and Clean Energy}, vol. 10, no. 3, pp. 562--579, May 2022.
+
+\end{thebibliography}
+
+\end{document}
