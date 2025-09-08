@@ -175,18 +175,13 @@ def _objective_from_vars(
     return total
 
 
-def verify_solution_to_log(
-    scenario: UnitCommitmentScenario,
-    model,
-    out_dir: Optional[Path] = None,
-    filename: Optional[str] = None,
-) -> Path:
-    out_dir = out_dir or DataParams._LOGS
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if filename is None:
-        filename = "SCUC_verification.log"
-    out_path = out_dir / filename
-
+def verify_solution(
+    scenario: UnitCommitmentScenario, model
+) -> Tuple[bool, List[CheckItem], str]:
+    """
+    In-memory verification of a solved model.
+    Returns: (overall_ok, checks, report_text)
+    """
     T = scenario.time
     units = scenario.thermal_units
     reserves = scenario.reserves or []
@@ -654,6 +649,7 @@ def verify_solution_to_log(
         CheckItem(ID_O_TOTAL, "Objective consistency (recomputed vs solver)", worst)
     )
 
+    # Compose lines
     lines_out: List[str] = []
     lines_out.append("===== SCUC Solution Verification =====")
     lines_out.append(f"Scenario      : {scenario.name}")
@@ -682,5 +678,24 @@ def verify_solution_to_log(
     lines_out.append("")
     lines_out.append(f"Overall: {'OK' if overall_ok else 'VIOLATIONS DETECTED'}")
 
-    out_path.write_text("\n".join(lines_out), encoding="utf-8")
+    return overall_ok, checks, "\n".join(lines_out)
+
+
+def verify_solution_to_log(
+    scenario: UnitCommitmentScenario,
+    model,
+    out_dir: Optional[Path] = None,
+    filename: Optional[str] = None,
+) -> Path:
+    """
+    Verify and write a report to src/data/logs (or a custom out_dir). Returns the report path.
+    """
+    out_dir = out_dir or DataParams._LOGS
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if filename is None:
+        filename = "SCUC_verification.log"
+    out_path = out_dir / filename
+
+    overall_ok, _checks, report_text = verify_solution(scenario, model)
+    out_path.write_text(report_text, encoding="utf-8")
     return out_path

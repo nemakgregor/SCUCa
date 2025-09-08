@@ -36,6 +36,14 @@ class DataParams:
     _OUTPUT = Path(__file__).resolve().parent.parent / "data" / "output"
     _OUTPUT.mkdir(parents=True, exist_ok=True)
 
+    # Intermediate directory (for ML artifacts, warm starts, etc.)
+    _INTERMEDIATE = Path(__file__).resolve().parent.parent / "data" / "intermediate"
+    _INTERMEDIATE.mkdir(parents=True, exist_ok=True)
+
+    # Warm start directory under intermediate
+    _WARM_START = _INTERMEDIATE / "warm_start"
+    _WARM_START.mkdir(parents=True, exist_ok=True)
+
     # Logs directory for solution/verification: src/data/logs
     _LOGS = Path(__file__).resolve().parent.parent / "data" / "logs"
     _LOGS.mkdir(parents=True, exist_ok=True)

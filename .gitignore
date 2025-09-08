@@ -3,10 +3,8 @@ __pycache__/
 *.py[cod]
 
 # Downloaded datasets
-src/data/input/
-src/data/logs/
-src/data/output/
-drafts/
+data/
+src/data/
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
@@ -17,7 +15,9 @@ SCUC/
 !src/optimization_model/solver/scuc/
 !src/optimization_model/solver/scuc/**
 
-__pycache__/
 *.pyc
 
 openapi/
+
+*.json
+*.csv

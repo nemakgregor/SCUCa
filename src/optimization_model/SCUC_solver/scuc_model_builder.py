@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gurobipy as gp
 import logging
+from typing import Optional, Callable
 
 from src.data_preparation.data_structure import UnitCommitmentScenario
 from src.optimization_model.solver.scuc.data.load import compute_total_load
@@ -23,8 +24,20 @@ from src.optimization_model.solver.scuc import (
 logger = logging.getLogger(__name__)
 
 
-def build_model(scenario: UnitCommitmentScenario) -> gp.Model:
-    """Build a segmented SCUC model with commitment, startup/shutdown, reserves, and line constraints."""
+def build_model(
+    scenario: UnitCommitmentScenario,
+    *,
+    contingency_filter: Optional[Callable] = None,
+) -> gp.Model:
+    """Build a segmented SCUC model with commitment, startup/shutdown, reserves, and line constraints.
+
+    Parameters
+    ----------
+    scenario : UnitCommitmentScenario
+    contingency_filter : Optional[Callable]
+        Optional predicate(kind, line_l, out_obj, t, coeff, F_em) -> bool.
+        If provided, contingency constraints (+/- pairs) for which this returns False are pruned.
+    """
     model = gp.Model("SCUC_Segmented")
 
     units = scenario.thermal_units
@@ -156,6 +169,7 @@ def build_model(scenario: UnitCommitmentScenario) -> gp.Model:
                 time_periods,
                 cont_over_pos,
                 cont_over_neg,
+                filter_predicate=contingency_filter,
             )
 
     # Objective with reserve penalty and line overflow penalty (base case and contingencies)
