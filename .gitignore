@@ -4,7 +4,7 @@ __pycache__/
 
 # Downloaded datasets
 data/
-src/data/
+src/data/*
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
