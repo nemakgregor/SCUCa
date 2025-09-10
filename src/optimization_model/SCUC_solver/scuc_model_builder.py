@@ -28,6 +28,7 @@ def build_model(
     scenario: UnitCommitmentScenario,
     *,
     contingency_filter: Optional[Callable] = None,
+    use_lazy_contingencies: bool = False,
 ) -> gp.Model:
     """Build a segmented SCUC model with commitment, startup/shutdown, reserves, and line constraints.
 
@@ -36,7 +37,12 @@ def build_model(
     scenario : UnitCommitmentScenario
     contingency_filter : Optional[Callable]
         Optional predicate(kind, line_l, out_obj, t, coeff, F_em) -> bool.
-        If provided, contingency constraints (+/- pairs) for which this returns False are pruned.
+        If provided and returns False, the corresponding +/- constraints are pruned.
+        Ignored when use_lazy_contingencies=True.
+    use_lazy_contingencies : bool
+        If True, do NOT add explicit contingency constraints here; instead, the caller
+        must attach the lazy-contingency callback to add them on the fly.
+        Contingency overflow slacks are still created and used in the objective.
     """
     model = gp.Model("SCUC_Segmented")
 
@@ -159,7 +165,7 @@ def build_model(
         )
 
         # Line and generator contingency limits with shared slacks
-        if scenario.contingencies:
+        if scenario.contingencies and not use_lazy_contingencies:
             scuc_cons.contingencies.add_constraints(
                 model,
                 scenario,
