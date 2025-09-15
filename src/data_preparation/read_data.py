@@ -42,7 +42,8 @@ def read_benchmark(name: str, *, quiet: bool = False) -> UnitCommitmentInstance:
     if not local_path.is_file():
         if not quiet:
             print(f"Downloading  {url}")
-        download(url, local_path)
+        # Hide the download progress bar when quiet=True (experiments mode)
+        download(url, local_path, show_progress=not quiet)
 
     instance = _read(str(local_path), scenario_id_hint=name, quiet=quiet)
 
