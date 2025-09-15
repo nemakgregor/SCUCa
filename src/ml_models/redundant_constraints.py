@@ -1,31 +1,27 @@
 """
 RedundancyProvider: k-NN constraint-pruning for contingencies.
 
-Goal
-- Learn from historical solutions (src/data/output) which contingency constraints
-  (line-outage, gen-outage) are always slack with a comfortable margin, so we can
-  skip adding them to the SCUC model for similar instances and reduce model size.
+This version is memory-safe:
+- The persisted index stores ONLY per-instance features (z-scored system load).
+- The large per-constraint margins are NOT stored anymore.
+- At inference time (make_filter_for_instance), we compute conservative
+  pruning metrics ON THE FLY from the nearest-neighbor's saved JSON solution.
 
-Approach
-- Per case folder (e.g., matpower/case57), build an index over solved outputs:
-  Item = {instance name, feature vector = zscored system load, per-constraint margins}
-- For each solved instance i and scenario sc(i):
-  * For each contingency c and time t:
-    - Line-outage: for each monitored line l and outaged line m with LODF[l,m] = α,
-      estimate post-contingency flow = f_l[t] + α * f_m[t], margin s = F_em(l,t) - |post|.
-    - Gen-outage: for each gen g at bus b with ISF[l,b] = β,
-      estimate post flow = f_l[t] - β * p_g[t], margin s = F_em(l,t) - |post|.
-  * Store s per (l,m,t) and (l,g,t). Positive s = safe slack (redundant candidate).
-- At inference time for a target instance j:
-  * Find nearest neighbor i* by Euclidean distance on zscored load vector.
-  * Build a filter predicate that skips a constraint if neighbor margin s >= thr_abs + thr_rel*F_em.
-    Otherwise, keep the constraint.
+How pruning works now
+- For each monitored line l and outaged line m (line-outage), we compute:
+    s_rel_min(l|m) = min_t (F_em(l,t) - |f_l(t) + α f_m(t)|) / F_em(l,t)
+  using the neighbor's base flows and the target scenario's LODF and F_em.
+- For each monitored line l and outaged generator g (gen-outage), we compute:
+    s_rel_min(l|g) = min_t (F_em(l,t) - |f_l(t) - β p_g(t)|) / F_em(l,t)
+  using ISF β and neighbor's p_g(t).
+- If s_rel_min >= thr_rel we PRUNE (skip) that pair (for all t); otherwise we keep.
+- This is slightly more conservative (we use min across time) but drastically
+  reduces memory usage and avoids OOM even on large cases.
 
-Notes
-- Our SCUC contingency constraints use these same base-case expressions (no explicit redispatch),
-  so using neighbor’s margins is a strong heuristic to prune constraints safely.
-- You can restrict neighbors to the TRAIN split to emulate train/test data usage.
-- If no trained index or no neighbor found, the provider returns None (no pruning).
+Other improvements
+- Index file uses json.dump (streaming) without building a huge string.
+- Optional restriction to TRAIN split when building the index (smaller file).
+- Optional cap on number of outputs used to build index (max_items).
 
 Artifacts
 - Index is saved to: src/data/intermediate/redundancy/rc_index_<case_tag>.json
@@ -34,11 +30,12 @@ Artifacts
 import json
 import gzip
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set, Callable
 
-from scipy.sparse import csr_matrix, csc_matrix
+from scipy.sparse import csc_matrix
 
 from src.data_preparation.params import DataParams
 from src.data_preparation.read_data import read_benchmark
@@ -138,11 +135,18 @@ class RedundancyProvider:
     """
     k-NN based predictor to skip (prune) contingency constraints safely.
 
-    Data saved per instance:
-      - features: z-scored system load vector
-      - line_pairs:  dict "l|m" -> [margin_t] where margin_t = F_em(l,t) - |f_l + α f_m|
-      - gen_pairs:   dict "l|g" -> [margin_t] where margin_t = F_em(l,t) - |f_l - β p_g|
+    Memory-light index:
+      - features: z-scored system load vector ONLY
+      - no per-constraint arrays are stored
+
+    At inference time:
+      - We load the nearest neighbor's JSON and compute per-pair min relative margin
+        s_rel_min on the fly, then build a pruning predicate.
     """
+
+    # Numerical tolerances (keep in sync with constraints builder)
+    _LODF_TOL = 1e-4
+    _ISF_TOL = 1e-8
 
     def __init__(
         self,
@@ -234,14 +238,10 @@ class RedundancyProvider:
             for it in items:
                 name = it.get("instance")
                 feats = it.get("features", [])
-                lpairs = it.get("line_pairs", {})
-                gpairs = it.get("gen_pairs", {})
                 if not name or feats is None:
                     continue
                 idx[name] = {
                     "features": feats,
-                    "line_pairs": lpairs,
-                    "gen_pairs": gpairs,
                 }
             self._index = idx
             self._coverage = float(obj.get("coverage", 0.0))
@@ -271,8 +271,6 @@ class RedundancyProvider:
                 {
                     "instance": name,
                     "features": list(it.get("features", [])),
-                    "line_pairs": it.get("line_pairs", {}),
-                    "gen_pairs": it.get("gen_pairs", {}),
                 }
             )
         payload = {
@@ -288,156 +286,27 @@ class RedundancyProvider:
             },
             "items": items,
         }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Stream to disk without building a giant string in RAM
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
         return path
 
-    def _compute_margins_for_instance(
-        self, instance_name: str, out_json: dict
-    ) -> Optional[Tuple[Dict[str, List[float]], Dict[str, List[float]], List[float]]]:
-        """
-        Compute per-constraint margins (line-outage, gen-outage) for one instance.
-        Returns (line_pairs, gen_pairs, feats) or None if not computable.
-        """
-        # Load scenario (to get ISF, LODF, limits)
+    def _extract_features_from_output(self, out_json: dict) -> Optional[List[float]]:
         try:
-            inst = read_benchmark(instance_name, quiet=True)
-            sc = inst.deterministic
-        except Exception:
-            return None
-        if not sc.lines:
-            return None
-
-        T = sc.time
-        # Features: system load (z-scored)
-        try:
-            feats = out_json.get("system", {}).get("load", None)
-            feats = _ensure_list_length([float(x) for x in feats], T, True, 0.0)
-        except Exception:
-            feats = [sum(b.load[t] for b in sc.buses) for t in range(T)]
-        feats = _zscore(feats)
-
-        # Base flows and gen power from output JSON
-        net = out_json.get("network", {}) or {}
-        lines_out = net.get("lines", {}) or {}
-        if not lines_out:
-            return None
-        flows: Dict[str, List[float]] = {}
-        for ln in sc.lines:
-            obj = lines_out.get(ln.name)
-            if not obj:
+            sys_load = out_json.get("system", {}).get("load", None)
+            if not sys_load:
                 return None
-            flows[ln.name] = _ensure_list_length(obj.get("flow", []), T, True, 0.0)
+            feats = _zscore([float(x) for x in sys_load])
+            return feats
+        except Exception:
+            return None
 
-        gens_out = out_json.get("generators", {}) or {}
-        pgen: Dict[str, List[float]] = {}
-        for g in sc.thermal_units:
-            gobj = gens_out.get(g.name, {}) or {}
-            p_list = gobj.get("total_power", None)
-            if p_list is None:
-                # reconstruct as min + sum(segments)
-                commit = _ensure_list_length(gobj.get("commit", []), T, True, 0)
-                seg2d = gobj.get("segment_power", None)
-                nS = len(g.segments) if g.segments else 0
-                if isinstance(seg2d, list):
-                    seg2d = _ensure_list_length(seg2d, T, True, [0.0] * nS)
-                else:
-                    seg2d = [[0.0] * nS for _ in range(T)]
-                total = []
-                for t in range(T):
-                    val = float(commit[t]) * float(g.min_power[t])
-                    for s in range(nS):
-                        val += float(seg2d[t][s])
-                    total.append(val)
-                pgen[g.name] = total
-            else:
-                pgen[g.name] = _ensure_list_length(p_list, T, True, 0.0)
-
-        # Precompute sparse matrices and mappings
-        lodf_csc: csc_matrix = sc.lodf.tocsc()
-        isf_csc: csc_matrix = sc.isf.tocsc()
-        buses = sc.buses
-        ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
-        non_ref_bus_indices = sorted([b.index for b in buses if b.index != ref_1b])
-        col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
-        line_by_row = {ln.index - 1: ln for ln in sc.lines}
-        row_by_line = {ln.name: ln.index - 1 for ln in sc.lines}
-
-        # Compute margins
-        line_pairs: Dict[str, List[float]] = {}
-        gen_pairs: Dict[str, List[float]] = {}
-
-        # Line-outage
-        for cont in sc.contingencies or []:
-            if not cont.lines:
-                continue
-            for out_line in cont.lines:
-                mcol = out_line.index - 1
-                col = lodf_csc.getcol(mcol)
-                for l_row, alpha in zip(col.indices.tolist(), col.data.tolist()):
-                    if l_row == mcol:
-                        continue
-                    line_l = line_by_row.get(l_row)
-                    if line_l is None:
-                        continue
-                    # Build per-t margin
-                    key = f"{line_l.name}|{out_line.name}"
-                    s_vec = line_pairs.get(key)
-                    if s_vec is None:
-                        s_vec = [0.0 for _ in range(T)]
-                        line_pairs[key] = s_vec
-                    for t in range(T):
-                        f_l = float(flows[line_l.name][t])
-                        f_m = float(flows[out_line.name][t])
-                        post = f_l + float(alpha) * f_m
-                        F_em = float(line_l.emergency_limit[t])
-                        s_vec[t] = F_em - abs(post)
-
-        # Gen-outage
-        for cont in sc.contingencies or []:
-            if not getattr(cont, "units", None):
-                continue
-            for gen in cont.units:
-                bidx = gen.bus.index
-                if bidx == ref_1b or bidx not in col_by_bus_1b:
-                    # Effect zero or undefined; margin = F_em - |f_l|
-                    col = None
-                else:
-                    col = isf_csc.getcol(col_by_bus_1b[bidx])
-
-                # Build margin per line,time
-                if col is None:
-                    # No ISF column => post = f_l (no change)
-                    for line_l in sc.lines:
-                        key = f"{line_l.name}|{gen.name}"
-                        s_vec = gen_pairs.get(key)
-                        if s_vec is None:
-                            s_vec = [0.0 for _ in range(T)]
-                            gen_pairs[key] = s_vec
-                        for t in range(T):
-                            f_l = float(flows[line_l.name][t])
-                            F_em = float(line_l.emergency_limit[t])
-                            s_vec[t] = F_em - abs(f_l)
-                else:
-                    rows = col.indices.tolist()
-                    vals = col.data.tolist()
-                    isf_map = {r: v for r, v in zip(rows, vals)}
-                    for line_l in sc.lines:
-                        key = f"{line_l.name}|{gen.name}"
-                        s_vec = gen_pairs.get(key)
-                        if s_vec is None:
-                            s_vec = [0.0 for _ in range(T)]
-                            gen_pairs[key] = s_vec
-                        beta = float(isf_map.get(row_by_line[line_l.name], 0.0))
-                        for t in range(T):
-                            f_l = float(flows[line_l.name][t])
-                            p_g = float(pgen[gen.name][t])
-                            post = f_l - beta * p_g
-                            F_em = float(line_l.emergency_limit[t])
-                            s_vec[t] = F_em - abs(post)
-
-        return line_pairs, gen_pairs, feats
-
-    def _build_index(self, case_folder: str) -> None:
+    def _build_index(
+        self,
+        case_folder: str,
+        max_items: Optional[int] = None,
+        restrict_to_train: bool = True,
+    ) -> None:
         inputs = self._list_inputs(case_folder)
         outputs = self._list_outputs(case_folder)
         total_inputs = len(inputs)
@@ -446,29 +315,64 @@ class RedundancyProvider:
 
         self._inputs_list = [self._dataset_name_from_input(p) for p in inputs]
         outputs_names = [self._dataset_name_from_output(p) for p in outputs]
+        self._outputs_list = outputs_names
 
+        # Splits based on output names available
+        self._compute_splits_from_names(outputs_names)
+
+        if restrict_to_train:
+            outputs = [
+                p
+                for p in outputs
+                if self._dataset_name_from_output(p) in self._splits["train"]
+            ]
+
+        if max_items is not None and max_items > 0:
+            outputs = outputs[:max_items]
+
+        print(
+            f"[redundancy] Building light index for '{case_folder}': using {len(outputs)}/{total_outputs} outputs "
+            f"(coverage={self._coverage:.3f})."
+        )
+
+        t0 = time.time()
         idx: Dict[str, dict] = {}
-        for out_path in outputs:
+        for i, out_path in enumerate(outputs, start=1):
             out = _load_output_solution(out_path)
             if not out:
                 continue
             instance_name = self._dataset_name_from_output(out_path)
-            computed = self._compute_margins_for_instance(instance_name, out)
-            if computed is None:
-                continue
-            line_pairs, gen_pairs, feats = computed
+            feats = self._extract_features_from_output(out)
+            # Fallback: derive from input JSON if not present in output
+            if not feats:
+                in_path = (self.base_input / (instance_name + ".json.gz")).resolve()
+                sys_load = _load_input_system_load(in_path)
+                if not sys_load:
+                    continue
+                feats = _zscore([float(x) for x in sys_load])
             idx[instance_name] = {
                 "features": feats,
-                "line_pairs": line_pairs,
-                "gen_pairs": gen_pairs,
             }
+            if i == 1 or (i % 50 == 0) or (i == len(outputs)):
+                elapsed = time.time() - t0
+                print(
+                    f"[redundancy] processed {i}/{len(outputs)} outputs (elapsed {elapsed:.1f}s)"
+                )
 
         self._index = idx
         self._available = len(self._index) > 0
-        self._compute_splits_from_names(sorted(self._index.keys()))
+        # Splits already computed on outputs_names
+        t1 = time.time()
+        print(
+            f"[redundancy] Done. Indexed {len(self._index)} item(s) in {t1 - t0:.1f}s."
+        )
 
     def pretrain(
-        self, case_folder: Optional[str] = None, force: bool = False
+        self,
+        case_folder: Optional[str] = None,
+        force: bool = False,
+        max_items: Optional[int] = None,
+        restrict_to_train: bool = True,
     ) -> Optional[Path]:
         cf = case_folder or self.case_folder
         if not cf:
@@ -477,7 +381,7 @@ class RedundancyProvider:
         if path.exists() and not force:
             if self._load_index_file(cf):
                 return path
-        self._build_index(cf)
+        self._build_index(cf, max_items=max_items, restrict_to_train=restrict_to_train)
         if not self._index:
             return None
         return self._save_index_file(cf)
@@ -518,12 +422,158 @@ class RedundancyProvider:
             return None
         return best_name, best_item, best_dist
 
+    def _compute_minrel_from_neighbor(
+        self,
+        scenario,
+        neighbor_out: dict,
+    ) -> Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]:
+        """
+        Compute min relative margin across time for (line|out_line) and (line|gen).
+        Returns:
+          (line_pairs_min_rel, gen_pairs_min_rel)
+          where each dict maps (l_name, m_name) or (l_name, g_name) -> min_rel in [.., 1]
+        """
+        # Extract flows per line and total power per generator from neighbor's output
+        lines = scenario.lines or []
+        T = scenario.time
+        lodf_csc: csc_matrix = scenario.lodf.tocsc()
+        isf_csc: csc_matrix = scenario.isf.tocsc()
+
+        # flows
+        net = neighbor_out.get("network", {}) or {}
+        lines_out = net.get("lines", {}) or {}
+        flows: Dict[str, List[float]] = {}
+        for ln in lines:
+            obj = lines_out.get(ln.name)
+            if not obj:
+                # If missing, treat as zeros
+                flows[ln.name] = [0.0 for _ in range(T)]
+            else:
+                flows[ln.name] = _ensure_list_length(
+                    [float(x) for x in obj.get("flow", [])], T, True, 0.0
+                )
+
+        # pgen
+        gens_out = neighbor_out.get("generators", {}) or {}
+        pgen: Dict[str, List[float]] = {}
+        for g in scenario.thermal_units:
+            gobj = gens_out.get(g.name, {}) or {}
+            p_list = gobj.get("total_power", None)
+            if p_list is not None:
+                pgen[g.name] = _ensure_list_length(
+                    [float(x) for x in p_list], T, True, 0.0
+                )
+            else:
+                # reconstruct as min + sum(segments)
+                commit = _ensure_list_length(gobj.get("commit", []), T, True, 0)
+                seg2d = gobj.get("segment_power", None)
+                nS = len(g.segments) if g.segments else 0
+                if isinstance(seg2d, list):
+                    seg2d = _ensure_list_length(seg2d, T, True, [0.0] * nS)
+                else:
+                    seg2d = [[0.0] * nS for _ in range(T)]
+                total = []
+                for t in range(T):
+                    val = float(commit[t]) * float(g.min_power[t])
+                    for s in range(nS):
+                        val += float(seg2d[t][s])
+                    total.append(val)
+                pgen[g.name] = total
+
+        # Mappings
+        line_by_row = {ln.index - 1: ln for ln in lines}
+        buses = scenario.buses
+        ref_1b = getattr(scenario, "ptdf_ref_bus_index", buses[0].index)
+        non_ref_bus_indices = sorted([b.index for b in buses if b.index != ref_1b])
+        col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
+
+        # Results
+        line_pairs_min: Dict[Tuple[str, str], float] = {}
+        gen_pairs_min: Dict[Tuple[str, str], float] = {}
+
+        # Line-outage min rel margin
+        for cont in scenario.contingencies or []:
+            if not cont.lines:
+                continue
+            for out_line in cont.lines:
+                mcol = out_line.index - 1
+                col = lodf_csc.getcol(mcol)
+                rows = col.indices.tolist()
+                vals = col.data.tolist()
+                for l_row, alpha in zip(rows, vals):
+                    if l_row == mcol or abs(alpha) < self._LODF_TOL:
+                        continue
+                    line_l = line_by_row.get(l_row)
+                    if line_l is None:
+                        continue
+                    key = (line_l.name, out_line.name)
+                    s_rel_min = float("+inf")
+                    for t in range(T):
+                        f_l = float(flows[line_l.name][t])
+                        f_m = float(flows[out_line.name][t])
+                        post = f_l + float(alpha) * f_m
+                        F_em = float(line_l.emergency_limit[t])
+                        if F_em <= 0:
+                            continue
+                        s_rel = (F_em - abs(post)) / F_em
+                        if s_rel < s_rel_min:
+                            s_rel_min = s_rel
+                    if s_rel_min != float("+inf"):
+                        line_pairs_min[key] = float(s_rel_min)
+
+        # Gen-outage min rel margin
+        for cont in scenario.contingencies or []:
+            if not getattr(cont, "units", None):
+                continue
+            for gen in cont.units:
+                bidx = gen.bus.index
+                if bidx == ref_1b or bidx not in col_by_bus_1b:
+                    # Effectively coeff=0 => post=f_l; compute min rel per line
+                    for line_l in lines:
+                        key = (line_l.name, gen.name)
+                        s_rel_min = float("+inf")
+                        for t in range(T):
+                            f_l = float(flows[line_l.name][t])
+                            F_em = float(line_l.emergency_limit[t])
+                            if F_em <= 0:
+                                continue
+                            s_rel = (F_em - abs(f_l)) / F_em
+                            if s_rel < s_rel_min:
+                                s_rel_min = s_rel
+                        if s_rel_min != float("+inf"):
+                            gen_pairs_min[key] = float(s_rel_min)
+                else:
+                    col = isf_csc.getcol(col_by_bus_1b[bidx])
+                    rows = col.indices.tolist()
+                    vals = col.data.tolist()
+                    isf_map = {r: v for r, v in zip(rows, vals)}
+                    for line_l in lines:
+                        beta = float(isf_map.get(line_l.index - 1, 0.0))
+                        if abs(beta) < self._ISF_TOL:
+                            continue
+                        key = (line_l.name, gen.name)
+                        s_rel_min = float("+inf")
+                        for t in range(T):
+                            f_l = float(flows[line_l.name][t])
+                            p_g = float(pgen[gen.name][t])
+                            post = f_l - beta * p_g
+                            F_em = float(line_l.emergency_limit[t])
+                            if F_em <= 0:
+                                continue
+                            s_rel = (F_em - abs(post)) / F_em
+                            if s_rel < s_rel_min:
+                                s_rel_min = s_rel
+                        if s_rel_min != float("+inf"):
+                            gen_pairs_min[key] = float(s_rel_min)
+
+        return line_pairs_min, gen_pairs_min
+
     def make_filter_for_instance(
         self,
         scenario,
         instance_name: str,
         *,
-        thr_abs: float = 20.0,
+        thr_abs: float = 20.0,  # deprecated (ignored)
         thr_rel: float = 0.10,
         use_train_index_only: bool = True,
         exclude_self: bool = True,
@@ -531,7 +581,8 @@ class RedundancyProvider:
         """
         Build a filter predicate closure for contingencies.add_constraints.
 
-        A constraint is pruned (skipped) if neighbor margin s >= thr_abs + thr_rel * F_em.
+        A constraint is pruned (skipped) if neighbor min_rel margin >= thr_rel.
+        We use min over time of s_rel(t) per pair to be conservative.
 
         Returns (predicate, stats) or None if no trained index/neighbor.
         stats = {"neighbor": str, "distance": float, "skipped_line": int, "skipped_gen": int}
@@ -559,36 +610,17 @@ class RedundancyProvider:
         )
         if nn is None:
             return None
-        nn_name, nn_item, nn_dist = nn
+        nn_name, _nn_item, nn_dist = nn
 
-        # Build skip sets
-        line_pairs = nn_item.get("line_pairs", {}) or {}
-        gen_pairs = nn_item.get("gen_pairs", {}) or {}
+        # Compute min relative margins on the fly from neighbor JSON
+        neighbor_json_path = (self.base_output / (nn_name + ".json")).resolve()
+        neighbor = _load_output_solution(neighbor_json_path)
+        if neighbor is None:
+            return None
 
-        thr = lambda F_em: float(thr_abs) + float(thr_rel) * float(F_em)
-
-        # Pre-generate skip masks as dict[(lname, oname, t)] -> True to skip
-        skip_line = {}
-        skip_gen = {}
-        # Line-outage keys l|m
-        for key, s_list in line_pairs.items():
-            try:
-                l_name, m_name = key.split("|", 1)
-            except Exception:
-                continue
-            s_list = _ensure_list_length([float(x) for x in s_list], T, True, 0.0)
-            # We'll compute threshold at call-time (depends on F_em of target scenario)
-            # so here we only store margins per t.
-            skip_line[(l_name, m_name)] = s_list
-
-        # Gen-outage keys l|g
-        for key, s_list in gen_pairs.items():
-            try:
-                l_name, g_name = key.split("|", 1)
-            except Exception:
-                continue
-            s_list = _ensure_list_length([float(x) for x in s_list], T, True, 0.0)
-            skip_gen[(l_name, g_name)] = s_list
+        line_pairs_minrel, gen_pairs_minrel = self._compute_minrel_from_neighbor(
+            scenario, neighbor
+        )
 
         stats = {
             "neighbor": nn_name,
@@ -597,31 +629,31 @@ class RedundancyProvider:
             "skipped_gen": 0,
         }
 
+        thr = float(thr_rel)
+
         def _predicate(
             kind: str, line_l, out_obj, t: int, coeff: float, F_em: float
         ) -> bool:
             """
             Return True to include the constraint, False to prune.
             kind: "line" for line-outage; "gen" for gen-outage
+            We ignore t here because we used min over time already to decide.
             """
-            Fthr = thr(F_em)
             if kind == "line":
                 key = (line_l.name, out_obj.name)
-                s_vec = skip_line.get(key)
-                if s_vec is None:
+                srel = line_pairs_minrel.get(key, None)
+                if srel is None:
                     return True
-                s = float(s_vec[min(max(0, int(t)), T - 1)])
-                if s >= Fthr:
+                if srel >= thr:
                     stats["skipped_line"] += 1
                     return False
                 return True
             else:
                 key = (line_l.name, out_obj.name)
-                s_vec = skip_gen.get(key)
-                if s_vec is None:
+                srel = gen_pairs_minrel.get(key, None)
+                if srel is None:
                     return True
-                s = float(s_vec[min(max(0, int(t)), T - 1)])
-                if s >= Fthr:
+                if srel >= thr:
                     stats["skipped_gen"] += 1
                     return False
                 return True

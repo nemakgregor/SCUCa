@@ -42,12 +42,14 @@ def read_benchmark(name: str, *, quiet: bool = False) -> UnitCommitmentInstance:
     if not local_path.is_file():
         if not quiet:
             print(f"Downloading  {url}")
-        download(url, local_path)
+        # Hide the download progress bar when quiet=True (experiments mode)
+        download(url, local_path, show_progress=not quiet)
 
-    instance = _read(str(local_path), scenario_id_hint=name)
+    instance = _read(str(local_path), scenario_id_hint=name, quiet=quiet)
 
-    print(f"→ Loaded instance '{name}' with {len(instance.scenarios)} scenarios.")
-    print("Path to instance:", local_path)
+    if not quiet:
+        print(f"→ Loaded instance '{name}' with {len(instance.scenarios)} scenarios.")
+        print("Path to instance:", local_path)
 
     return instance
 
@@ -55,6 +57,7 @@ def read_benchmark(name: str, *, quiet: bool = False) -> UnitCommitmentInstance:
 def _read(
     path_or_paths: Union[str, Sequence[str]],
     scenario_id_hint: Optional[str] = None,
+    quiet: bool = False,
 ) -> UnitCommitmentInstance:
     """
     Generic loader.  Accepts:
@@ -67,10 +70,12 @@ def _read(
       which dataset was solved.
     """
     if isinstance(path_or_paths, (list, tuple)):
-        scenarios = [_read_scenario(p) for p in path_or_paths if isinstance(p, str)]
+        scenarios = [
+            _read_scenario(p, quiet=quiet) for p in path_or_paths if isinstance(p, str)
+        ]
         repair_scenario_names_and_probabilities(scenarios, list(path_or_paths))
     else:
-        scenarios = [_read_scenario(path_or_paths)]
+        scenarios = [_read_scenario(path_or_paths, quiet=quiet)]
         # Name scenario using the original "name" hint if available; otherwise
         # fall back to a sanitized path-based id.
         if scenario_id_hint:
@@ -95,10 +100,10 @@ def _read(
     return UnitCommitmentInstance(time=scenarios[0].time, scenarios=scenarios)
 
 
-def _read_scenario(path: str) -> UnitCommitmentScenario:
+def _read_scenario(path: str, quiet: bool = False) -> UnitCommitmentScenario:
     raw = _read_json(path)
     migrate(raw)
-    return from_json(raw)
+    return from_json(raw, quiet=quiet)
 
 
 def _read_json(path: str) -> dict:

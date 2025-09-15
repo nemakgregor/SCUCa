@@ -1,22 +1,50 @@
 """
-Benchmark pipeline: compare raw Gurobi vs ML-based (warm-start + redundant-constraint pruning).
+Benchmark pipeline: compare raw Gurobi vs ML-based (warm-start + lazy callback + optional redundant-constraint pruning).
+
+Key fix in this version:
+- RAW and WARM can now use different lazy-contingency settings.
+  Previously both ran with the same flags, so sizes and times could be identical.
+  Now:
+    • RAW defaults to NO lazy contingencies (explicit model with all constraints).
+    • WARM defaults to lazy contingencies ON (constraints added by callback only when violated).
+  This makes the comparison meaningful and exposes the effect of lazy callback,
+  branching hints, and (optionally) redundancy pruning.
 
 What it does:
-- Stage 1 (TRAIN): solve with raw Gurobi, save outputs (skip if --skip-existing).
-- Stage 2: pretrain warm-start index from TRAIN outputs.
-- Stage 2.5 (optional): pretrain redundancy index from TRAIN outputs.
-- Stage 3 (TEST): for each instance, solve RAW and WARM(+optional pruning);
+- Stage 1 (TRAIN): solve with raw Gurobi only for missing outputs; skip instances that
+  already have a JSON in src/data/output (always-on skip for TRAIN).
+- Stage 2: pretrain warm-start index from TRAIN outputs (read from src/data/output).
+- Stage 3 (optional): pretrain redundancy index from TRAIN outputs (read from src/data/output).
+- Stage 4 (TEST): for each instance, solve RAW and WARM (with independent lazy settings);
   verify feasibility and write:
     • a per-case results CSV under src/data/output/<case>/compare_<tag>_<timestamp>.csv
     • a general logs CSV under src/data/logs/compare_logs_<tag>_<timestamp>.csv
       with (instance, split, method, num vars, num constrs, runtime, max constraint violation, etc.)
+  NOTE: For TEST runs, human-readable logs (solution and verification) are always saved.
 
 Notes:
 - Redundancy pruning controls (all OFF unless you pass --rc-enable):
-    --rc-enable               Enable pruning
-    --rc-thr-abs 20.0         Absolute margin threshold [MW]
-    --rc-thr-rel 0.10         Relative margin threshold (fraction of emergency limit)
+    --rc-enable               Enable pruning (applies to WARM only)
+    --rc-thr-rel 0.10..0.50   Relative margin threshold (fraction of emergency limit)
     --rc-use-train-db         Restrict redundancy k-NN to TRAIN split (default True)
+  IMPORTANT: Redundancy pruning only applies when WARM runs WITHOUT lazy contingencies
+             (i.e., --warm-no-lazy), because pruning filters are only used when explicit
+             contingency constraints are built in the model.
+
+- Lazy N-1 enforcement (independent for RAW and WARM):
+    RAW:
+      --raw-use-lazy (default OFF) / --raw-no-lazy
+    WARM:
+      --warm-use-lazy (default ON) / --warm-no-lazy
+    Shared tolerances:
+      --lazy-top-k K
+      --lazy-viol-tol EPS
+      --lazy-lodf-tol TOL
+      --lazy-isf-tol TOL
+
+Default logging behavior:
+- General CSV logs are always saved (results CSV per case and general logs CSV under src/data/logs).
+- For TEST runs, we force saving human-readable logs (solution and verification) regardless of --save-logs.
 """
 
 from __future__ import annotations
@@ -53,6 +81,13 @@ from src.ml_models.warm_start import WarmStartProvider, _hash01
 from src.ml_models.redundant_constraints import (
     RedundancyProvider as RCProvider,
 )  # ML-based constraint pruning provider
+from src.optimization_model.helpers.lazy_contingency_cb import (
+    attach_lazy_contingency_callback,
+    LazyContingencyConfig,
+)
+from src.optimization_model.helpers.branching_hints import (
+    apply_branching_hints_from_starts,
+)
 
 
 def _status_str(code: int) -> str:
@@ -92,6 +127,14 @@ def _split_instances(
     return tr, va, te
 
 
+def _count_missing_outputs(names: List[str]) -> Tuple[int, List[str]]:
+    missing: List[str] = []
+    for nm in names:
+        if not compute_output_path(nm).is_file():
+            missing.append(nm)
+    return len(missing), missing
+
+
 @dataclass
 class SolveResult:
     instance_name: str
@@ -112,6 +155,9 @@ class SolveResult:
     num_int_vars: Optional[int] = None
     num_constrs: Optional[int] = None
     max_constraint_violation: Optional[float] = None
+    violations: Optional[str] = (
+        None  # "OK" or space-separated constraint IDs (e.g., "C105 C109")
+    )
 
 
 def _metrics_from_model(
@@ -180,6 +226,30 @@ def _max_constraint_violation(checks) -> Optional[float]:
         except Exception:
             continue
     return max(vals) if vals else 0.0
+
+
+def _violated_constraint_ids(checks) -> Optional[str]:
+    """
+    Return:
+      - "OK" if all constraints (C-xxx) are within tolerance,
+      - space-separated list like "C105 C109" if any constraints are violated,
+      - None if checks list is missing/None.
+    """
+    if not checks:
+        return None
+    ids: List[str] = []
+    for c in checks:
+        try:
+            if isinstance(c.idx, str) and c.idx.startswith("C-"):
+                v = float(c.value)
+                if math.isfinite(v) and v > 1e-6:
+                    ids.append(c.idx.replace("-", ""))  # "C-105" -> "C105"
+        except Exception:
+            continue
+    if not ids:
+        return "OK"
+    # deduplicate and sort for stability
+    return " ".join(sorted(set(ids)))
 
 
 def _save_logs_if_requested(sc, model, save_logs: bool) -> None:
@@ -277,6 +347,7 @@ def _prepare_results_csv(case_folder: str) -> Path:
         "num_int_vars",
         "num_constrs",
         "max_constraint_violation",
+        "violations",  # "OK" or constraint IDs space-separated
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         wr = csv.writer(fh)
@@ -312,6 +383,7 @@ def _append_result_to_csv(csv_path: Path, r: SolveResult) -> None:
                 ""
                 if r.max_constraint_violation is None
                 else f"{float(r.max_constraint_violation):.8f}",
+                "" if r.violations is None else r.violations,
             ]
         )
 
@@ -339,6 +411,7 @@ def _prepare_logs_csv(case_folder: str) -> Path:
         "num_bin_vars",
         "num_int_vars",
         "max_constraint_violation",
+        "violations",  # "OK" or constraint IDs space-separated
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(header)
@@ -365,6 +438,7 @@ def _append_result_to_logs_csv(csv_path: Path, r: SolveResult) -> None:
                 ""
                 if r.max_constraint_violation is None
                 else f"{float(r.max_constraint_violation):.8f}",
+                "" if r.violations is None else r.violations,
             ]
         )
 
@@ -374,7 +448,6 @@ def _build_contingency_filter(
     sc,
     instance_name: str,
     enable: bool,
-    thr_abs: float,
     thr_rel: float,
     use_train_db: bool,
 ) -> Optional[callable]:
@@ -384,7 +457,6 @@ def _build_contingency_filter(
         res = rc.make_filter_for_instance(
             sc,
             instance_name,
-            thr_abs=thr_abs,
             thr_rel=thr_rel,
             use_train_index_only=use_train_db,
             exclude_self=True,
@@ -411,11 +483,12 @@ def _solve_raw(
     download_attempts: int,
     download_timeout: int,
     *,
+    use_lazy: bool,
     rc_provider: Optional[RCProvider] = None,
     rc_enable: bool = False,
-    rc_thr_abs: float = 20.0,
     rc_thr_rel: float = 0.10,
     rc_use_train_db: bool = True,
+    args: argparse.Namespace,
 ) -> SolveResult:
     out_json_path = compute_output_path(instance_name)
     if skip_existing and out_json_path.is_file():
@@ -432,6 +505,7 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     ok_dl = _robust_download(
@@ -453,6 +527,7 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     try:
@@ -471,24 +546,40 @@ def _solve_raw(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     sc = inst.deterministic
-    cont_filter = _build_contingency_filter(
-        rc_provider,
-        sc,
-        instance_name,
-        rc_enable,
-        rc_thr_abs,
-        rc_thr_rel,
-        rc_use_train_db,
+    # RAW: never apply redundancy (rc_enable False)
+    cont_filter = _build_contingency_filter(None, sc, instance_name, False, 0.0, True)
+
+    # Build model with optional lazy-contingency enforcement
+    model = build_model(
+        scenario=sc,
+        contingency_filter=None if use_lazy else cont_filter,
+        use_lazy_contingencies=bool(use_lazy),
     )
-    model = build_model(scenario=sc, contingency_filter=cont_filter)
+
+    # If lazy is enabled, attach callback
+    if use_lazy and sc.contingencies:
+        cfg = LazyContingencyConfig(
+            lodf_tol=float(args.lazy_lodf_tol),
+            isf_tol=float(args.lazy_isf_tol),
+            violation_tol=float(args.lazy_viol_tol),
+            add_top_k=int(args.lazy_top_k)
+            if args.lazy_top_k and args.lazy_top_k > 0
+            else 0,
+            verbose=True,
+        )
+        attach_lazy_contingency_callback(model, sc, cfg)
+
     try:
         model.Params.OutputFlag = 1
         model.Params.MIPGap = mip_gap
         model.Params.TimeLimit = time_limit
         model.Params.NumericFocus = 1
+        if use_lazy:
+            model.Params.LazyConstraints = 1
     except Exception:
         pass
     model.optimize()
@@ -500,12 +591,15 @@ def _solve_raw(
 
     feasible_ok = None
     max_viol = None
+    violations = None
     try:
         feasible_ok, checks, _ = verify_solution(sc, model)
         max_viol = _max_constraint_violation(checks)
+        violations = _violated_constraint_ids(checks)
     except Exception:
         feasible_ok = None
         max_viol = None
+        violations = None
 
     _save_logs_if_requested(sc, model, save_logs)
 
@@ -529,6 +623,7 @@ def _solve_raw(
         num_int_vars=nint,
         num_constrs=ncons,
         max_constraint_violation=max_viol,
+        violations=violations,
     )
 
 
@@ -544,11 +639,12 @@ def _solve_warm(
     download_attempts: int,
     download_timeout: int,
     *,
+    use_lazy: bool,
     rc_provider: Optional[RCProvider] = None,
     rc_enable: bool = False,
-    rc_thr_abs: float = 20.0,
     rc_thr_rel: float = 0.10,
     rc_use_train_db: bool = True,
+    args: argparse.Namespace,
 ) -> SolveResult:
     out_json_path = compute_output_path(instance_name)
     if skip_existing and out_json_path.is_file():
@@ -565,6 +661,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     ok_dl = _robust_download(
@@ -586,6 +683,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
 
     try:
@@ -604,6 +702,7 @@ def _solve_warm(
             nodes=None,
             feasible_ok=None,
             warm_start_applied_vars=None,
+            violations=None,
         )
     sc = inst.deterministic
 
@@ -614,16 +713,22 @@ def _solve_warm(
     except Exception:
         pass
 
+    # WARM: redundancy applies only when NOT using lazy contingencies
     cont_filter = _build_contingency_filter(
         rc_provider,
         sc,
         instance_name,
-        rc_enable,
-        rc_thr_abs,
-        rc_thr_rel,
-        rc_use_train_db,
+        enable=bool(rc_enable and not use_lazy),
+        thr_rel=rc_thr_rel,
+        use_train_db=rc_use_train_db,
     )
-    model = build_model(scenario=sc, contingency_filter=cont_filter)
+
+    # Build model with optional lazy-contingency enforcement
+    model = build_model(
+        scenario=sc,
+        contingency_filter=None if use_lazy else cont_filter,
+        use_lazy_contingencies=bool(use_lazy),
+    )
 
     mode = warm_mode.strip().lower()
     if mode == "fixed":
@@ -634,11 +739,36 @@ def _solve_warm(
     except Exception:
         applied = 0
 
+    # Branching hints derived from warm Start values
+    try:
+        hints = apply_branching_hints_from_starts(model)
+        if hints and hints > 0:
+            print(
+                f"[branch_hints] Applied {hints} branching hints from warm Start values."
+            )
+    except Exception:
+        pass
+
+    # If lazy is enabled, attach callback
+    if use_lazy and sc.contingencies:
+        cfg = LazyContingencyConfig(
+            lodf_tol=float(args.lazy_lodf_tol),
+            isf_tol=float(args.lazy_isf_tol),
+            violation_tol=float(args.lazy_viol_tol),
+            add_top_k=int(args.lazy_top_k)
+            if args.lazy_top_k and args.lazy_top_k > 0
+            else 0,
+            verbose=True,
+        )
+        attach_lazy_contingency_callback(model, sc, cfg)
+
     try:
         model.Params.OutputFlag = 1
         model.Params.MIPGap = mip_gap
         model.Params.TimeLimit = time_limit
         model.Params.NumericFocus = 1
+        if use_lazy:
+            model.Params.LazyConstraints = 1
     except Exception:
         pass
 
@@ -651,12 +781,15 @@ def _solve_warm(
 
     feasible_ok = None
     max_viol = None
+    violations = None
     try:
         feasible_ok, checks, _ = verify_solution(sc, model)
         max_viol = _max_constraint_violation(checks)
+        violations = _violated_constraint_ids(checks)
     except Exception:
         feasible_ok = None
         max_viol = None
+        violations = None
 
     _save_logs_if_requested(sc, model, save_logs)
 
@@ -680,6 +813,7 @@ def _solve_warm(
         num_int_vars=nint,
         num_constrs=ncons,
         max_constraint_violation=max_viol,
+        violations=violations,
     )
 
 
@@ -726,7 +860,7 @@ def main():
         "--save-logs",
         action="store_true",
         default=False,
-        help="Save human logs to src/data/logs (solution and verification reports)",
+        help="Also save human-readable solution and verification logs (.log) to src/data/logs (TEST saves are always ON regardless of this flag)",
     )
     ap.add_argument(
         "--warm-mode",
@@ -737,8 +871,8 @@ def main():
     ap.add_argument(
         "--skip-existing",
         action="store_true",
-        default=False,
-        help="TRAIN ONLY: skip instances that already have a JSON solution in src/data/output",
+        default=True,
+        help="TRAIN ONLY: skip instances that already have a JSON solution in src/data/output (always recommended)",
     )
     ap.add_argument(
         "--download-attempts",
@@ -752,30 +886,75 @@ def main():
         default=60,
         help="Per-attempt HTTP timeout for instance download in seconds (default: 60)",
     )
-    # Redundancy pruning
+    # Redundancy pruning (WARM only)
     ap.add_argument(
         "--rc-enable",
         action="store_true",
         default=False,
-        help="Enable ML-based redundant contingency pruning (OFF by default)",
-    )
-    ap.add_argument(
-        "--rc-thr-abs",
-        type=float,
-        default=20.0,
-        help="Absolute margin threshold [MW] to prune a constraint (default 20 MW)",
+        help="Enable ML-based redundant contingency pruning for WARM (OFF by default). Ignored if WARM uses lazy.",
     )
     ap.add_argument(
         "--rc-thr-rel",
         type=float,
         default=0.50,
-        help="Relative margin threshold (fraction of F_em) to prune (default 0.50)",
+        help="Relative margin threshold (fraction of F_em) to prune (default 0.50). Only used if WARM runs without lazy.",
     )
     ap.add_argument(
         "--rc-use-train-db",
         action="store_true",
         default=True,
         help="Restrict redundancy k-NN to TRAIN split (default True)",
+    )
+    # Lazy contingency enforcement — independent toggles for RAW and WARM
+    ap.add_argument(
+        "--raw-use-lazy",
+        dest="raw_use_lazy",
+        action="store_true",
+        default=False,
+        help="RAW: enforce N-1 contingencies lazily via callback (default OFF).",
+    )
+    ap.add_argument(
+        "--raw-no-lazy",
+        dest="raw_use_lazy",
+        action="store_false",
+        help="RAW: disable lazy N-1; add all contingency constraints explicitly (default).",
+    )
+    ap.add_argument(
+        "--warm-use-lazy",
+        dest="warm_use_lazy",
+        action="store_true",
+        default=True,
+        help="WARM: enforce N-1 contingencies lazily via callback (default ON).",
+    )
+    ap.add_argument(
+        "--warm-no-lazy",
+        dest="warm_use_lazy",
+        action="store_false",
+        help="WARM: disable lazy N-1; add contingency constraints explicitly (enables redundancy pruning).",
+    )
+    ap.add_argument(
+        "--lazy-top-k",
+        type=int,
+        default=0,
+        help="Max lazy constraints to add per incumbent (0 => add all violated).",
+    )
+    ap.add_argument(
+        "--lazy-viol-tol",
+        type=float,
+        default=1e-6,
+        help="Violation tolerance [MW] for lazy constraints (default 1e-6).",
+    )
+    ap.add_argument(
+        "--lazy-lodf-tol",
+        type=float,
+        default=1e-4,
+        help="Ignore |LODF| < tol when screening lazy constraints (default 1e-4).",
+    )
+    ap.add_argument(
+        "--lazy-isf-tol",
+        type=float,
+        default=1e-8,
+        help="Ignore |ISF| < tol when screening lazy constraints (default 1e-8).",
     )
 
     args = ap.parse_args()
@@ -801,16 +980,22 @@ def main():
     if args.limit_test and args.limit_test > 0:
         test = test[: args.limit_test]
 
+    # Quick report + missing outputs count for TRAIN
+    missing_count, _missing_list = _count_missing_outputs(train)
     print(f"Case: {case_folder}")
-    print(f"- Train: {len(train)}")
+    print(f"- Train: {len(train)} (missing outputs: {missing_count})")
     print(f"- Val  : {len(val)}")
     print(f"- Test : {len(test)}")
-    if args.skip_existing:
+    if missing_count > 0:
         print(
-            "Note: --skip-existing applies to TRAIN stage only. TEST runs will re-solve even if outputs exist."
+            "Note: TRAIN stage will solve only missing instances to populate src/data/output."
+        )
+    else:
+        print(
+            "All TRAIN outputs already present in src/data/output; no TRAIN solving needed."
         )
 
-    # Prepare CSVs
+    # Prepare CSVs (always)
     csv_path = _prepare_results_csv(case_folder)
     logs_csv_path = _prepare_logs_csv(case_folder)
     print(f"Results will be appended to: {csv_path}")
@@ -818,7 +1003,7 @@ def main():
 
     results: List[SolveResult] = []
 
-    # Stage 1: RAW Train (allow skipping existing)
+    # Stage 1: RAW Train (always skip existing to avoid re-solving)
     print("Stage 1: Solving TRAIN with raw Gurobi (no warm start) ...")
     for nm in train:
         r = _solve_raw(
@@ -826,20 +1011,27 @@ def main():
             args.time_limit,
             args.mip_gap,
             split="train",
-            save_logs=args.save_logs,
-            skip_existing=args.skip_existing,
+            save_logs=False,  # no human logs for TRAIN
+            skip_existing=True,  # enforce skip of existing outputs
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,
+            use_lazy=bool(args.raw_use_lazy),
             rc_provider=None,
             rc_enable=False,  # Do not prune while building train outputs
+            args=args,
         )
         _append_result_to_csv(csv_path, r)
         _append_result_to_logs_csv(logs_csv_path, r)
         results.append(r)
 
-    # Stage 2: Pretrain warm-start index from outputs (existing solutions are used)
+    # Stage 2: Pretraining warm-start index from TRAIN outputs ...
     print("Stage 2: Pretraining warm-start index from TRAIN outputs ...")
-    wsp = WarmStartProvider(case_folder=case_folder)
+    wsp = WarmStartProvider(
+        case_folder=case_folder,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        split_seed=args.seed,
+    )
     wsp.pretrain(force=True)
     trained, cov = wsp.ensure_trained(case_folder, allow_build_if_missing=False)
     print(f"- Warm-start index: trained={trained}, coverage={cov:.3f}")
@@ -848,11 +1040,16 @@ def main():
             "Index not trained (insufficient outputs). Evaluation will still try warm, but coverage may be low."
         )
 
-    # Stage 2.5: Pretrain redundancy index from TRAIN outputs (if enabled)
+    # Stage 3: Redundancy
     rc_provider = None
     if args.rc_enable:
-        print("Stage 2.5: Pretraining redundancy index from TRAIN outputs ...")
-        rc_provider = RCProvider(case_folder=case_folder)
+        print("Stage 3: Pretraining redundancy index from TRAIN outputs ...")
+        rc_provider = RCProvider(
+            case_folder=case_folder,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            split_seed=args.seed,
+        )
         rc_provider.pretrain(force=True)
         ok, rc_cov = rc_provider.ensure_trained(
             case_folder, allow_build_if_missing=False
@@ -862,30 +1059,31 @@ def main():
             print("Redundancy index not available. Pruning will be OFF.")
             rc_provider = None
 
-    # Stage 3: Compare on TEST (RAW vs WARM) — always re-solve; ignore skip-existing
-    print("Stage 3: Comparing on TEST (RAW vs WARM) ...")
+    # Stage 4: Compare on TEST (RAW vs WARM) — always re-solve and always save human logs
+    print("Stage 4: Comparing on TEST (RAW vs WARM) ...")
     for nm in test:
-        # RAW
+        # RAW (baseline; no redundancy; lazy per --raw-use-lazy)
         r_raw = _solve_raw(
             nm,
             args.time_limit,
             args.mip_gap,
             split="test",
-            save_logs=args.save_logs,
+            save_logs=True,  # force logs for TEST
             skip_existing=False,
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,
-            rc_provider=rc_provider,
-            rc_enable=args.rc_enable,
-            rc_thr_abs=args.rc_thr_abs,
+            use_lazy=bool(args.raw_use_lazy),
+            rc_provider=None,
+            rc_enable=False,
             rc_thr_rel=args.rc_thr_rel,
             rc_use_train_db=args.rc_use_train_db,
+            args=args,
         )
         _append_result_to_csv(csv_path, r_raw)
         _append_result_to_logs_csv(logs_csv_path, r_raw)
         results.append(r_raw)
 
-        # WARM
+        # WARM (features: warm start + hints; lazy per --warm-use-lazy; optional redundancy if no-lazy)
         r_warm = _solve_warm(
             nm,
             wsp,
@@ -893,15 +1091,16 @@ def main():
             args.mip_gap,
             split="test",
             warm_mode=args.warm_mode,
-            save_logs=args.save_logs,
+            save_logs=True,  # force logs for TEST
             skip_existing=False,
             download_attempts=args.download_attempts,
             download_timeout=args.download_timeout,
+            use_lazy=bool(args.warm_use_lazy),
             rc_provider=rc_provider,
-            rc_enable=args.rc_enable,
-            rc_thr_abs=args.rc_thr_abs,
+            rc_enable=bool(args.rc_enable),
             rc_thr_rel=args.rc_thr_rel,
             rc_use_train_db=args.rc_use_train_db,
+            args=args,
         )
         _append_result_to_csv(csv_path, r_warm)
         _append_result_to_logs_csv(logs_csv_path, r_warm)

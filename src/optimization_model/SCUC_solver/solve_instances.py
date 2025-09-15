@@ -1,34 +1,3 @@
-"""
-Batch solver for UnitCommitment.jl instances hosted at:
-  https://axavier.org/UnitCommitment.jl/0.4/instances/
-
-Features
-- Discover remote .json.gz instances by parsing directory listings (HTML index pages).
-- Filter which instances/folders to solve (e.g., case14, case30, case57).
-- Download (cache), build SCUC model, optimize, and save solution as JSON under src/data/output.
-- Skip instances that already have a saved JSON (resume-friendly).
-- Log unsolved instances (with reasons) to src/data/logs.
-- Append per-instance performance rows to ONE CSV per case folder:
-  src/data/output/<case_folder>/perf_<case_tag>_<technique>_<run>.csv
-  e.g., for all items under matpower/case14:
-        src/data/output/matpower/case14/perf_matpower_case14_basic_01.csv
-
-Usage
-  python -m src.optimization_model.SCUC_solver.solve_instances --include case57 case30 case14
-
-Useful flags:
-  --option basic         # technique tag embedded in CSV filename (basic, warm_start, ...)
-  --max-depth 4
-  --time-limit 600
-  --mip-gap 0.05
-  --roots matpower test
-  --limit 0
-  --skip-existing
-  --dry-run
-"""
-
-from __future__ import annotations
-
 import argparse
 import logging
 import re
@@ -48,7 +17,10 @@ from src.optimization_model.helpers.save_json_solution import (
 from src.optimization_model.helpers.perf_logger import PerfCSVLogger
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# NOTE:
+# Do NOT call logging.basicConfig() at import time. This module is imported by others
+# (e.g., src/paper/experiments.py). Configuring the root logger here causes duplicate
+# logs and interferes with caller-controlled logging.
 
 
 def _fetch_links(url: str, timeout: int = 30) -> List[str]:
@@ -245,6 +217,9 @@ def _append_to_log(filename: str, lines: Iterable[str]) -> None:
 
 
 def main():
+    # Configure logging ONLY when this module is invoked as a script.
+    logging.basicConfig(level=logging.INFO)
+
     parser = argparse.ArgumentParser(
         description="Batch solve UnitCommitment.jl instances and save JSON solutions."
     )

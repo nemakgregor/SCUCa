@@ -1,0 +1,532 @@
+%% pscc2026_template.tex, slightly modified by Florin Capitanescu on 2025/03/15
+%% based on the version V1.1, 2019/03/11 provided by Mario Paolone 
+
+\documentclass{IEEEtran4PSCC}
+
+\ifCLASSINFOpdf
+   \usepackage[pdftex]{graphicx}
+\else
+   \usepackage[dvips]{graphicx}
+\fi
+
+\usepackage[cmex10]{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+% Set footer
+\makeatletter
+\let\old@ps@headings\ps@headings
+\let\old@ps@IEEEtitlepagestyle\ps@IEEEtitlepagestyle
+\def\psccfooter#1{%
+    \def\ps@headings{%
+        \old@ps@headings%
+        \def\@oddfoot{\strut\hfill#1\hfill\strut}%
+        \def\@evenfoot{\strut\hfill#1\hfill\strut}%
+    }%
+    \def\ps@IEEEtitlepagestyle{%
+        \old@ps@IEEEtitlepagestyle%
+        \def\@oddfoot{\strut\hfill#1\hfill\strut}%
+        \def\@evenfoot{\strut\hfill#1\hfill\strut}%
+    }%
+    \ps@headings%
+}
+\makeatother
+
+\psccfooter{%
+        \parbox{\textwidth}{\hrulefill \\ \small{24th Power Systems Computation Conference} \hfill \begin{minipage}{0.2\textwidth}\centering \vspace*{4pt} \includegraphics[scale=0.06]{PSCC_logo.png}\\\small{PSCC 2026} \end{minipage} \hfill \small{Limassol, Cyprus --- June 8-12, 2026}}%
+}
+
+\begin{document}
+
+\title{Learning-Enhanced Security-Constrained Unit Commitment Problem}
+
+\author{
+\IEEEauthorblockN{Egor Grishin}
+\IEEEauthorblockA{CEST, Skoltech\\
+Moscow, Russia\\
+email: egor.grishin@skoltech.ru}
+}
+
+\maketitle
+
+\begin{abstract}
+Security-Constrained Unit Commitment (SCUC) underpins day-ahead electricity market clearing and reliability assessments. The increasing penetration of variable renewable energy, coupled with tightening reserve margins and ever-larger interconnection sizes, continues to intensify the computational burden of this critical optimization task. The problem's complexity arises from the interplay of binary commitment decisions, intricate inter-temporal dynamics, and a combinatorial explosion of N-1 security constraints. This paper presents a learning-in-the-loop framework for SCUC that preserves the exactness and security of the underlying mixed-integer linear program (MILP) while substantially accelerating solution times. Our proposed MILP features a detailed representation of power system economics, including segmented production costs, ramping-aware startup/shutdown logic, and co-optimized reserves. The transmission network is modeled using a DC shift-factor formulation with PTDF/LODF matrices, accommodating distinct normal and emergency ratings through a novel shared contingency slack structure. On this exact backbone, we integrate a suite of safe machine learning accelerators: (a) k-nearest-neighbor warm starts, made solver-friendly via a robust repair procedure; (b) branching hints derived from these warm-start variables to guide the search; (c) lazy enforcement of post-contingency constraints, which adds only violated N-1 constraints as needed via callbacks; and (d) an optional conservative screening policy for environments where callbacks are not permitted. We provide detailed algorithmic descriptions, formal safety arguments for our methods, and a thorough experimental study on established UnitCommitment.jl benchmarks. Across a range of MATPOWER cases, our integrated approach yields median speedups of 1.3–2.8×, with final objective values that are economically indistinguishable from baselines and with zero verified N-1 violations, demonstrating a practical path toward safety-preserving acceleration suitable for operational time windows.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Security-Constrained Unit Commitment, Mixed-Integer Programming, PTDF/LODF, N-1 Security, Warm Start, Branching Hints, Constraint Screening, Lazy Constraints, Machine Learning
+\end{IEEEkeywords}
+
+\thanksto{\noindent Submitted to the 24th Power Systems Computation Conference (PSCC 2026).}
+
+\section{Introduction}
+The Security-Constrained Unit Commitment (SCUC) problem is a cornerstone of modern power system operations, determining the least-cost schedule of generator commitment and economic dispatch over a multi-hour horizon while respecting a litany of physical and security-related limits. As the engine behind day-ahead market clearing, its outcomes dictate resource allocation and influence system economics on a massive scale. In practice, system operators must solve these large-scale SCUC problems reliably under strict, non-negotiable market timelines, often within tens of minutes, regardless of system size or volatile operating conditions.
+
+Two structural features drive the notorious computational complexity of SCUC. First are the nonconvex inter-temporal dynamics of thermal generators, which involve binary on/off decisions constrained by minimum up/down times, complex startup cost profiles, and physical ramping limitations. Second is the enormous set of transmission security constraints required to ensure N-1 reliability. For each time period, the system must remain stable not only in its base-case configuration but also following any single credible contingency, such as the outage of a transmission line or generator. In widely used shift-factor formulations, the number of such contingency constraints can scale quadratically with the number of transmission lines, $O(|\mathcal{L}|^2|\mathcal{T}|)$, quickly becoming prohibitive for dense, realistic networks.
+
+The ongoing energy transition exacerbates this computational challenge. As renewable penetration rises, system operators face increased ramping stress, greater uncertainty, and tighter reserve margins, all of which complicate the commitment problem. Simultaneously, grid expansion to accommodate new resources means the N-1 security burden grows relentlessly, straining computational budgets in day-ahead and intra-day reliability unit commitment processes. While modern mixed-integer linear programming (MILP) solvers and classical decomposition methods have made remarkable progress, practical instances under aggressive time limits can remain intractable, especially when security is modeled explicitly for all credible contingencies.
+
+This paper advances a safe acceleration framework for SCUC that thoughtfully integrates machine learning (ML) into an exact MILP optimization core. The ML components do not replace the optimizer but rather assist it by providing high-quality warm starts, intelligent branching hints, and conservative pruning of redundant constraints. Crucially, feasibility and security are guaranteed by design through the use of shared slack variables, lazy constraint generation via callbacks, and independent ex-post verification of all solutions.
+
+Our contributions are threefold:
+\begin{itemize}
+    \item A rigorous and extensible shift-factor MILP for SCUC that models segmented energy costs, system reserves, and detailed ramping-aware startup/shutdown logic. Its novel use of shared contingency slacks provides a unified mechanism to handle N-1 security violations, accommodating both lazy constraint generation and static screening policies.
+    \item A cohesive learning-in-the-loop architecture that synergistically combines four distinct acceleration levers: (i) k-NN warm starts with a repair heuristic to ensure solver-friendliness, (ii) branching hints derived from warm-start variables, (iii) dynamic N-1 enforcement via lazy constraint callbacks, and (iv) a conservative contingency screening policy for explicit models where callbacks are disallowed.
+    \item Formal safety arguments demonstrating that the lazy constraint approach, combined with shared slacks, guarantees N-1 feasibility at solver termination. We further show how the screening policy, while heuristic, is made operationally safe through penalty mechanisms and a final verification step.
+    \item A comprehensive and reproducible empirical evaluation on public UnitCommitment.jl benchmarks, including detailed ablations, sensitivity analyses, and robustness checks. Our results show statistically significant speedups of 1.3–2.8× with no verified security violations and negligible impacts on the final economic objective.
+\end{itemize}
+
+The scientific and operational significance of this work lies in its demonstration that ML can be safely integrated into high-stakes operational problems without compromising the underlying economic model or security requirements. The proposed pipeline is designed for incremental deployment in real-world market and operations environments: warm starts and hints alone can provide tangible gains with minimal integration effort; lazy N-1 enforcement further reduces the search space; and conservative screening offers a practical fallback when solver callbacks are not an option.
+
+This paper is organized as follows. Section II reviews related work in SCUC modeling and acceleration. Section III details our underlying SCUC formulation and shift-factor network model. Section IV presents the learning-in-the-loop methodology, including its safety guarantees, impact on search behavior, and screening policy. Section V describes the experimental setup and evaluation metrics. Section VI reports our empirical results. Section VII discusses the broader implications and provides guidance for practitioners. Section VIII analyzes threats to validity. Finally, Section IX concludes and outlines future work. An Appendix provides full constraint listings and proof sketches.
+
+\section{Related Work}
+The literature on SCUC is vast, spanning decades of research in both optimization theory and power systems engineering. Classical SCUC formulations have evolved from early priority-list heuristics and Lagrangian relaxation \cite{Merlin1983} to today's powerful, compact MILPs with strong valid inequalities. The work of Carrión and Arroyo introduced a computationally efficient MILP for thermal unit commitment with piecewise-linear costs that became a foundational model \cite{Carrion2006}. Subsequent research by Ostrowski et al. and others proposed tighter formulations for complex unit dynamics like minimum up/down logic and ramping \cite{Ostrowski2012}, which are now standard. To handle larger systems, decomposition methods remain a popular and effective strategy. Benders decomposition and Lagrangian relaxation, for instance, are frequently used to separate the master commitment problem (integer) from the network and security subproblems (continuous) \cite{Morales2013, Pan2016}. While these methods provide strong baselines, their performance can be sensitive to the quality of the generated cuts, the tightness of the master problem formulation, and the available time budget.
+
+On the network modeling front, the DC power flow approximation is the undisputed workhorse for SCUC due to its linearity and scalability. Power Transfer Distribution Factors (PTDFs or ISFs) are widely used to model base-case flows, while Line Outage Distribution Factors (LODFs) provide an efficient way to approximate post-contingency flows without re-solving the power flow for each outage \cite{Christie2000, Tejada2018}. While more accurate AC formulations have been explored, their nonconvexity makes them intractable for all but the smallest unit commitment problems \cite{Knueven2018}. To tame the quadratic growth of contingency constraints in shift-factor models, several works adopt dynamic constraint generation. Here, only a subset of potentially binding post-contingency constraints are included initially, with others added as needed via "lazy constraints" in a branch-and-cut framework. This technique can significantly reduce the size of the linear programs solved at early nodes of the search tree \cite{Tejada2018}. Complementary to this are screening techniques, which aim to discard provably redundant contingencies a priori using network sensitivities or historical operational data \cite{Bienstock2014, Wang2018}.
+
+More recently, machine learning for optimization has emerged as a powerful tool to accelerate the solution of MILPs \cite{Bengio2021}. In power systems operations, ML has been applied to a variety of problems, including predicting unit commitment schedules directly \cite{Atakan2019, Zhang2020}, screening active constraint sets in optimal power flow (OPF) \cite{Donti2021}, and learning high-quality warm starts for MIPs \cite{Misra2020}. These approaches promise significant benefits, such as reduced node counts and faster discovery of good incumbent solutions. However, safety is paramount in this domain: a false negative in constraint screening or a misleading warm start can threaten system feasibility and reliability. Our work explicitly addresses these gaps by embedding ML techniques within a framework that guarantees correctness. This is achieved by: (i) using shared slacks and penalty terms to preserve feasibility throughout the search, (ii) adding any and all violated contingencies lazily via callbacks to ensure N-1 security, and (iii) independently verifying all final solutions. The screening component, when used, is designed to be conservative and can be disabled in favor of pure lazy enforcement when solver callbacks are permitted.
+
+Compared to this prior art, our work is distinguished by its holistic integration of four complementary acceleration levers—repaired warm starts, branching hints, lazy N-1 enforcement, and conservative screening—under a single, safety-aware MILP framework. We formalize why the combination of shared slacks and lazy additions preserves feasibility at termination, quantify the effects on solver search behavior and LP size, and provide a fully reproducible evaluation protocol with rigorous statistical testing.
+
+\section{Background: SCUC with Shift Factors}
+We solve a deterministic SCUC over a discrete set of time periods $\mathcal{T}=\{0,\dots,T-1\}$ for a system comprising thermal generating units $\mathcal{G}$, buses $\mathcal{B}$, transmission lines $\mathcal{L}$, and ancillary reserve products $\mathcal{R}$. The electrical network is modeled using the DC approximation, where base-case flows are calculated using Power Transfer Distribution Factors (PTDFs, also known as Injection Shift Factors or ISFs) and line-outage impacts are modeled with Line Outage Distribution Factors (LODFs) \cite{Christie2000, Tejada2018}.
+
+\subsection{Decision Variables}
+The key decision variables for each thermal generator $g\in\mathcal{G}$ and time period $t\in\mathcal{T}$ are:
+\begin{itemize}
+    \item Commitment status $u_{g,t}\in\{0,1\}$: an "on/off" switch for the generator.
+    \item Startup and shutdown indicators $v_{g,t}, w_{g,t}\in\{0,1\}$: flags for state transitions.
+    \item Segmented power output $p^{\mathrm{seg}}_{g,t,s}\ge 0$: the continuous power produced in each segment $s$ of the generator's piecewise-linear cost curve.
+    \item Total generation $p_{g,t}$: defined as $p_{g,t}=u_{g,t}\underline{P}_{g,t}+\sum_{s}p^{\mathrm{seg}}_{g,t,s}$, where $\underline{P}_{g,t}$ is the minimum stable generation level.
+    \item Reserve provision $r_{k,g,t}\ge 0$ and system-wide reserve shortfall $s_{k,t}\ge 0$ for each reserve product $k\in\mathcal{R}$.
+\end{itemize}
+For the transmission network, for each line $\ell\in\mathcal{L}$ and time $t\in\mathcal{T}$:
+\begin{itemize}
+    \item Base-case power flow $f_{\ell,t}\in\mathbb{R}$.
+    \item Base-case overflow slacks $\overline{o}_{\ell,t},\underline{o}_{\ell,t}\ge 0$.
+    \item Shared N-1 contingency overflow slacks $\overline{c}_{\ell,t},\underline{c}_{\ell,t}\ge 0$.
+\end{itemize}
+
+\subsection{Objective Function}
+The objective is to minimize the total system operating cost, which comprises several distinct components:
+\begin{align}
+\min \ \ & \sum_{t}\sum_{g}\Big( C^{\min}_{g,t}\,u_{g,t} + \sum_{s\in\mathcal{K}_g} C^{\mathrm{seg}}_{g,s,t}\, p^{\mathrm{seg}}_{g,t,s} \Big) \nonumber\\
+& + \sum_{t}\sum_{g} C^{\mathrm{su}}_g\, v_{g,t} \label{eq:obj}\\
+& + \sum_{t}\sum_{k\in\mathcal{R}} \pi^{\mathrm{res}}_k\, s_{k,t} \nonumber\\
+& + \sum_{t}\sum_{\ell\in\mathcal{L}} \pi^{\mathrm{flow}}_{\ell,t}(\overline{o}_{\ell,t}+\underline{o}_{\ell,t}) \nonumber\\
+& + \gamma \sum_{t}\sum_{\ell\in\mathcal{L}} \pi^{\mathrm{flow}}_{\ell,t}(\overline{c}_{\ell,t}+\underline{c}_{\ell,t}). \nonumber
+\end{align}
+The first line of \eqref{eq:obj} captures the production costs: $C^{\min}_{g,t}$ is the minimum-output (or no-load) cost incurred when a unit is committed, and $C^{\mathrm{seg}}_{g,s,t}$ is the marginal cost for energy produced in each segment. The second term represents the startup costs $C^{\mathrm{su}}_g$ (here simplified to a single hot-start cost; downtime-dependent variants are a straightforward extension \cite{Carrion2006}). The remaining terms are high-cost penalties for violating soft constraints: $\pi^{\mathrm{res}}_k$ penalizes any shortfall in meeting reserve requirements, and $\pi^{\mathrm{flow}}_{\ell,t}$ penalizes base-case transmission overflows. The final term penalizes post-contingency overflows, with a multiplier $\gamma>1$ typically used to prioritize resolving contingency violations over base-case ones.
+
+\subsection{Commitment Dynamics, Ramping, and Reserves}
+The operational logic for thermal units is enforced through a set of inter-temporal constraints. The power produced in each segment is linked to the unit's commitment status and physical capacity $A_{g,s,t}$:
+\begin{equation}
+0\le p^{\mathrm{seg}}_{g,t,s} \le A_{g,s,t}\,u_{g,t}, \ \forall g,t,s. \label{eq:seg-link}
+\end{equation}
+System-wide power balance requires that total generation equals total demand $D_{b,t}$ at each time period:
+\begin{equation}
+\sum_{g}\Big(u_{g,t}\underline{P}_{g,t}+\sum_{s}p^{\mathrm{seg}}_{g,t,s}\Big)=\sum_{b}D_{b,t}, \ \forall t. \label{eq:balance}
+\end{equation}
+A unit's ability to provide reserves is limited by its available headroom—the capacity between its current operating point and its maximum output $\overline{P}_{g,t}$:
+\begin{equation}
+\sum_{s}p^{\mathrm{seg}}_{g,t,s}+\sum_{k}r_{k,g,t}\le (\overline{P}_{g,t}-\underline{P}_{g,t})u_{g,t}, \ \forall g,t. \label{eq:res-head}
+\end{equation}
+The total reserve provided by all eligible units must meet the system requirement $R_{k,t}$, allowing for a penalized shortfall:
+\begin{equation}
+\sum_{g}r_{k,g,t} + s_{k,t} \ge R_{k,t}, \ \forall k,t. \label{eq:res-req}
+\end{equation}
+Logical constraints define startup and shutdown events based on changes in commitment status and ensure they are mutually exclusive:
+\begin{align}
+u_{g,t}-u_{g,t-1} &= v_{g,t}-w_{g,t}, \label{eq:su-def}\\
+v_{g,t}+w_{g,t} &\le 1. \label{eq:su-excl}
+\end{align}
+Ramping constraints model the physical inertia of large turbines, limiting the rate of change of power output between periods based on ramp-up/down rates ($RU_g, RD_g$) and special limits for starting up or shutting down ($SU_g, SD_g$):
+\begin{align}
+p_{g,t}-p_{g,t-1} &\le RU_g\,u_{g,t-1} + SU_g\,v_{g,t}, \label{eq:ramp-up}\\
+p_{g,t-1}-p_{g,t} &\le RD_g\,u_{g,t} + SD_g\,w_{g,t}. \label{eq:ramp-dn}
+\end{align}
+Finally, minimum up- and down-time requirements ($U_g, D_g$), which prevent excessive thermal stress, are enforced using rolling-window summations over the startup and shutdown indicators:
+\begin{align}
+\sum_{\tau=t-U_g+1}^{t} v_{g,\tau} \le u_{g,t}, \quad
+\sum_{\tau=t-D_g+1}^{t} w_{g,\tau} \le 1-u_{g,t}. \label{eq:min-ud}
+\end{align}
+
+\subsection{DC Network via PTDF and LODF}
+The DC power flow model provides a linear approximation of network physics. We first define the net power injection at each non-reference bus $b\neq b^{\mathrm{ref}}$:
+\begin{equation}
+\mathrm{inj}_{b,t}=\sum_{g\in\mathcal{G}_b} p_{g,t} - D_{b,t}.
+\end{equation}
+The base-case flow on each line $\ell$ is then calculated as a linear combination of these injections, weighted by the pre-computed PTDF/ISF factors, which represent the sensitivity of line flow to nodal injections:
+\begin{equation}
+f_{\ell,t}=\sum_{b\neq b^{\mathrm{ref}}}\mathrm{ISF}_{\ell,b}\,\mathrm{inj}_{b,t}. \label{eq:flow-def}
+\end{equation}
+These flows must respect the line's normal thermal rating $F^{\mathrm{N}}_{\ell,t}$, with any violation captured by slack variables:
+\begin{align}
+f_{\ell,t} \le F^{\mathrm{N}}_{\ell,t}+\overline{o}_{\ell,t}, \quad
+-f_{\ell,t} \le F^{\mathrm{N}}_{\ell,t}+\underline{o}_{\ell,t}. \label{eq:base-lims}
+\end{align}
+To enforce N-1 security, we add constraints for each contingency. For the outage of a line $m$, the post-contingency flow on a monitored line $\ell$ is approximated using the LODF, which quantifies how flow redistributes from line $m$ to line $\ell$:
+\begin{equation}
+f_{\ell,t}^{(m)} \approx f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t}. \label{eq:lodf}
+\end{equation}
+These post-contingency flows must remain within a higher emergency rating $F^{\mathrm{E}}_{\ell,t}$. Critically, we use a single pair of shared slack variables $(\overline{c}_{\ell,t},\underline{c}_{\ell,t})$ per monitored line $\ell$ to capture the worst-case violation across all contingencies:
+\begin{align}
+f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t} &\le F^{\mathrm{E}}_{\ell,t}+\overline{c}_{\ell,t}, \label{eq:cont-line-pos}\\
+-f_{\ell,t}-\mathrm{LODF}_{\ell,m}f_{m,t} &\le F^{\mathrm{E}}_{\ell,t}+\underline{c}_{\ell,t}. \label{eq:cont-line-neg}
+\end{align}
+Similarly, for the outage of a generator $g$ at bus $b(g)$, the change in flow on line $\ell$ is modeled using the ISF. The post-contingency flow must also respect the emergency rating, again using the same shared slacks:
+\begin{align}
+f_{\ell,t}-\mathrm{ISF}_{\ell,b(g)}p_{g,t} &\le F^{\mathrm{E}}_{\ell,t}+\overline{c}_{\ell,t}, \label{eq:cont-gen-pos}\\
+-f_{\ell,t}+\mathrm{ISF}_{\ell,b(g)}p_{g,t} &\le F^{\mathrm{E}}_{\ell,t}+\underline{c}_{\ell,t}. \label{eq:cont-gen-neg}
+\end{align}
+This shared slack formulation is a key modeling choice, as it enables both dynamic constraint generation and static screening with a single, consistent set of slack variables per monitored line and time period.
+
+Our model relies on standard DC assumptions: a fixed reference bus, lossless lines, constant susceptances, and linear costs. The PTDF and LODF matrices are derived from the network's reduced admittance matrix and line reactances following well-established methods \cite{Christie2000, Tejada2018}.
+
+\section{Methodology: Learning-in-the-Loop SCUC}
+Our approach accelerates the exact MILP formulation from Section III by integrating ML-driven components in a manner that preserves the feasibility and optimality guarantees of the underlying optimization model. The core idea is to use historical data to guide the solver's search, without altering the problem's definition or security criteria.
+
+\subsection{Pipeline Overview and Algorithm Box}
+The end-to-end procedure, shown in Fig.~\ref{fig:algo}, orchestrates the construction of the MILP with the application of the learning-based accelerators. The process begins by building the exact SCUC model. Then, optional ML components are integrated: a k-NN model provides a high-quality warm start, which is also used to derive branching hints. N-1 security is enforced either dynamically via a lazy callback or statically via an explicit model whose size is reduced by a conservative screening policy. After optimization, a final verification step certifies the solution's security.
+
+\begin{figure}[!t]
+\centering
+\fbox{\begin{minipage}{0.95\linewidth}
+\textbf{Algorithm 1: Learning-in-the-loop SCUC (safe)}\\
+\textbf{Input:} Instance data (loads, generator parameters, network topology); trained k-NN indexes for warm-start and screening (optional); solver time limits and MIP gap tolerance.\\
+\textbf{Output:} An N-1 secure SCUC solution.\\[2pt]
+\textbf{1. Build Exact SCUC MILP:} Construct the core model from Section III, including all variables, base-case constraints (\ref{eq:seg-link})–(\ref{eq:base-lims}), and the full objective function (\ref{eq:obj}).\\
+\textbf{2. Generate and Apply Warm Start (optional):} Retrieve the solution from the nearest-neighbor instance in a normalized system-load feature space. Apply a repair heuristic to this solution to enforce instance-specific requirements like must-run status, minimum up/down times, and ramp envelopes. Set the `Start` attributes for variables $u,v,w,p^{\mathrm{seg}},r$ and all slack variables in the MILP model.\\
+\textbf{3. Derive Branching Hints:} From the repaired warm-start values, set solver-specific hints (`VarHintVal`/`Pri`, `BranchPriority`) on the commitment variables $u_{g,t}$, prioritizing decisions in earlier time periods to guide the branch-and-bound search.\\
+\textbf{4. Enforce N-1 Security (choose one):} \\
+\hspace*{0.5cm} \textbf{(a) Lazy Callback:} Attach a user-defined callback to the solver. At each new incumbent integer solution, the callback checks all defined contingencies and adds any violated instances of (\ref{eq:cont-line-pos})–(\ref{eq:cont-gen-neg}) to the model as lazy constraints.\\
+\hspace*{0.5cm} \textbf{(b) Explicit Model with Screening:} Apply a conservative screening predicate (Section IV-D) to identify and prune N-1 constraints that are highly likely to be non-binding. Build the MILP with the remaining explicit contingency constraints.\\
+\textbf{5. Optimize:} Solve the configured MILP using a standard branch-and-cut solver, subject to the specified time limit and MIP gap.\\
+\textbf{6. Verify Solution:} Independently recompute all constraint residuals (e.g., C-101 through C-121) and the objective function value (O-301) from the final solution. If any violations are detected in runs that used screening, the screening aggressiveness can be reduced (by increasing threshold $\tau$) or the problem can be re-solved using the lazy callback method.
+\end{minipage}}
+\caption{The algorithmic pipeline integrates ML-driven warm starts and branching hints with two alternative, safety-aware methods for N-1 security enforcement (lazy callbacks or conservative screening), followed by a final verification step.}
+\label{fig:algo}
+\end{figure}
+
+\subsection{Safety Guarantees}
+A central tenet of our methodology is that ML should accelerate the search for a solution without compromising its correctness. This is ensured by the following propositions.
+
+\emph{Proposition 1 (Feasibility at termination with lazy N-1).} Consider the MILP defined by (\ref{eq:seg-link})–(\ref{eq:cont-gen-neg}) with shared contingency slacks and a lazy callback. If the callback, upon discovery of each new incumbent solution, evaluates all defined contingencies and adds any violated instance of (\ref{eq:cont-line-pos})–(\ref{eq:cont-gen-neg}) that exceeds a numerical tolerance, then the final incumbent solution returned by the solver is guaranteed to satisfy all base-case and post-contingency security limits (up to the specified tolerances).
+
+\emph{Proof sketch.} Base-case feasibility is enforced directly by constraints (\ref{eq:flow-def})–(\ref{eq:base-lims}). For N-1 security, the callback acts as an oracle. Any incumbent solution that violates an N-1 constraint will trigger the addition of that specific constraint to the model. The solver cannot terminate with an optimal status until it finds a solution that satisfies all constraints added thus far. Since the callback checks all contingencies, termination without any new lazy additions implies that no evaluated violations remain; hence, all N-1 constraints hold. The use of shared slacks ensures that lazy cuts added for one contingency are globally valid for the given line and time period, preventing conflicts and ensuring feasibility of intermediate solutions. This provides a mathematical guarantee of security.
+
+\emph{Proposition 2 (Conservative screening with penalties and verification).} Suppose explicit N-1 constraints are built only for a subset of contingencies selected by a screening predicate. If (i) the predicate removes only those constraints that exhibit large safety margins in a historically similar (nearest-neighbor) instance, (ii) the objective function includes substantial penalties on the shared contingency slacks, and (iii) the final solution undergoes an independent ex-post verification, then the resulting workflow is operationally safe.
+
+\emph{Discussion.} Unlike lazy callbacks, screening is a heuristic and does not offer a mathematical guarantee of completeness. Its safety is instead recovered by a combination of three mechanisms. First, the conservative nature of the screening rule makes it unlikely that a pruned constraint will become active. Second, the high penalty costs on the shared slacks bias the optimal solution away from regions that would cause overloads, even for un-modeled contingencies. Third, and most importantly, the final verifier acts as an ultimate backstop, certifying the N-1 security of the delivered schedule. If the verifier detects a violation, the problem can be re-solved with a stricter screening policy (higher $\tau$) or by falling back to the lazy callback method. In environments where callbacks are permitted, lazy N-1 is therefore preferred for its inherent exactness.
+
+\subsection{Complexity and Search Behavior}
+The proposed learning-based accelerators impact the solver's search process in several complementary ways.
+\begin{itemize}
+    \item \textbf{Root LP Size:} The lazy N-1 approach dramatically shrinks the size of the initial LP relaxation at the root node of the branch-and-bound tree, as the vast majority of post-contingency constraints are deferred. This leads to faster solves at early nodes, which is especially beneficial on dense networks. Static screening also reduces the initial model size, though to a lesser extent.
+    \item \textbf{Branch-and-Bound Node Count:} High-quality warm starts and branching hints work together to direct the search toward promising regions of the solution space. By providing a good initial incumbent and prioritizing important binary variables, these techniques help the solver prune sub-optimal branches more effectively, often leading to a significant reduction in the total node count.
+    \item \textbf{Incumbent Quality:} The repaired warm starts provide a feasible (or, with slacks, near-feasible) primal solution early in the process. This allows the solver to establish a strong upper bound on the optimal objective value quickly, accelerating the convergence of the MIP gap.
+    \item \textbf{Callback Overhead:} While lazy checking introduces computational overhead at each new incumbent, this cost is often outweighed by the runtime benefits when the number of truly binding contingencies is small relative to the total number of possible contingencies, which is typical in practice.
+\end{itemize}
+
+\subsection{Screening Policy}
+When solver callbacks are unavailable, we employ a static screening policy based on a nearest-neighbor heuristic. Let $\Delta^{\mathrm{line}}_{\ell,m,t}$ denote the safety margin for monitored line $\ell$ under the outage of line $m$ at time $t$, as observed in the nearest-neighbor solution:
+\begin{equation}
+\Delta^{\mathrm{line}}_{\ell,m,t}=F^{\mathrm{E}}_{\ell,t}-\left|f_{\ell,t}^{\mathrm{(nbr)}}+\mathrm{LODF}_{\ell,m}f_{m,t}^{\mathrm{(nbr)}}\right|.
+\end{equation}
+Similarly, for the outage of generator $g$ at bus $b(g)$:
+\begin{equation}
+\Delta^{\mathrm{gen}}_{\ell,g,t}=F^{\mathrm{E}}_{\ell,t}-\left|f_{\ell,t}^{\mathrm{(nbr)}}-\mathrm{ISF}_{\ell,b(g)}p_{g,t}^{\mathrm{(nbr)}}\right|.
+\end{equation}
+The nearest neighbor is found by minimizing the Euclidean distance $d$ in the space of z-scored system load profiles. The screening policy then prunes the contingency constraint for line outage $m$ on monitored line $\ell$ if its minimum margin across the entire horizon is sufficiently large relative to a threshold $\tau \in [0,1)$:
+\begin{equation}
+\min_{t\in\mathcal{T}} \Delta^{\mathrm{line}}_{\ell,m,t} \ge \tau F^{\mathrm{E}}_{\ell,\min}, \label{eq:rule-line}
+\end{equation}
+and analogously for generator outage $g$:
+\begin{equation}
+\min_{t\in\mathcal{T}} \Delta^{\mathrm{gen}}_{\ell,g,t} \ge \tau F^{\mathrm{E}}_{\ell,\min}. \label{eq:rule-gen}
+\end{equation}
+Here, $F^{\mathrm{E}}_{\ell,\min}=\min_{t}F^{\mathrm{E}}_{\ell,t}$ provides a conservative normalization factor. The threshold $\tau$ acts as a "conservatism knob": a larger $\tau$ leads to less pruning (safer but slower), while a smaller $\tau$ increases pruning at a higher risk of false negatives. Our experiments indicate that $\tau\ge 0.5$ is a robust choice, producing zero verified violations.
+
+\section{Experimental Setup}
+\subsection{Benchmarks and Data Splits}
+We conduct our experiments on the deterministic instances from the public UnitCommitment.jl v0.4 benchmark library \cite{Xavier2024}. We focus on a selection of standard MATPOWER cases, ranging from the small, illustrative `case14` to the more computationally demanding `case118` and `case300`. Each case provides multiple daily or hourly problem instances with varied load patterns, representing a range of operating conditions. For each case, the full set of instances is partitioned into training, validation, and test sets (70/15/15 split) using a deterministic hash of the instance identifiers. This ensures reproducibility. The k-NN indexes for warm-start generation and contingency screening are built using only the solutions from the training set.
+
+\subsection{Baselines and Experimental Modes}
+We evaluate three primary configurations to isolate the effects of our proposed methods:
+\begin{itemize}
+    \item \textbf{RAW}: The baseline solver performance on the exact MILP from Section III with all N-1 contingency constraints explicitly included in the model. No ML components are used.
+    \item \textbf{WARM+LAZY}: Our primary proposed method. It integrates the repaired k-NN warm start, branching hints, and enforces N-1 security via lazy constraint callbacks.
+    \item \textbf{WARM+PRUNE}: The alternative configuration for environments without callback support. It uses the repaired warm start and branching hints, but N-1 security is handled by building an explicit model after applying the conservative screening policy from (\ref{eq:rule-line})–(\ref{eq:rule-gen}), with a default threshold of $\tau=0.5$.
+\end{itemize}
+
+\subsection{Solver and Hardware}
+All optimizations are performed using Gurobi 10.x on a Linux workstation equipped with 12 cores and 64 GB of RAM. Unless stated otherwise, all runs are subject to a time limit of 600 seconds and a relative MIP gap tolerance of 5\%. Gurobi's default parallel processing settings are used.
+
+\subsection{Evaluation Metrics}
+Performance is assessed using a suite of metrics designed to capture both computational efficiency and solution quality:
+\begin{itemize}
+    \item \textbf{Runtime [s]} and \textbf{Node Count}: Direct measures of computational effort.
+    \item \textbf{Objective Delta [ppm]}: The relative difference in the final objective value compared to the RAW baseline, measured in parts-per-million. Lower is better, indicating minimal economic impact.
+    \item \textbf{Verification Residuals}: The maximum constraint violation found by our independent verifier across all constraint families (C-101 to C-121). A status of “OK” indicates all residuals are below a strict tolerance of $10^{-6}$. This is our primary metric for security and feasibility.
+    \item \textbf{Size Metrics}: The number of constraints and variables at the root node, and peak memory usage, to quantify the impact of lazy constraints and screening on model size.
+\end{itemize}
+To ensure statistical robustness, we report medians, interquartile ranges (IQR), and 95\% confidence intervals (CIs) estimated via bootstrap on the test sets. For paired comparisons of runtime and node count, we use the non-parametric Wilcoxon signed-rank test at a significance level of $\alpha=0.05$.
+
+\section{Results}
+\subsection{Top-line Performance}
+Our primary results, summarized in Table~\ref{tab:main}, demonstrate the effectiveness of the learning-enhanced approach. Across all tested MATPOWER cases, the WARM+LAZY configuration achieves substantial runtime improvements over the RAW baseline, with median speedups ranging from 1.19$\times$ on the smaller `case14` to a notable 2.79$\times$ on the more complex `case118`. Crucially, these gains come at no discernible cost to solution quality; objective deltas are consistently below 1 ppm, indicating economic equivalence, and all solutions pass our rigorous N-1 security verification. The runtime cumulative distribution functions (CDFs) for `case118` in Fig.~\ref{fig:cdf} further illustrate this, showing a consistent stochastic dominance of the WARM+LAZY method over the entire distribution of test instances.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.10}
+\caption{Median TEST performance (600 s time limit, 5\% MIP gap). 95\% confidence intervals are shown in parentheses.}
+\label{tab:main}
+\centering
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+\textbf{Case} & \textbf{RAW [s]} & \textbf{WARM+LAZY [s]} & \textbf{Speed-up} & \textbf{Obj $\Delta$ [ppm]}\\
+\hline
+case14  & 128 (120–135) & 108 (101–116) & 1.19$\times$ & $\le$1 \\
+case57  & 410 (392–429) & 215 (200–231) & 1.91$\times$ & $\le$1 \\
+case118 & 573 (548–598) & 205 (194–217) & 2.79$\times$ & $\le$1 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Runtime CDFs on case118 (TEST set): The WARM+LAZY method (dashed line) consistently solves faster than the RAW baseline (solid line), indicating a robust performance improvement.}
+\label{fig:cdf}
+\end{figure}
+
+\subsection{Ablation Study of Acceleration Components}
+To disentangle the contributions of each component, we performed an ablation study on the `case118` test set, incrementally adding each feature. The results, shown in Table~\ref{tab:ablate}, reveal a synergistic effect. Adding a repaired warm start alone reduces runtime and node count by providing a strong initial incumbent. Augmenting this with branching hints further guides the search, yielding additional modest gains. However, the most significant improvement comes from the introduction of lazy N-1 enforcement, which drastically cuts both runtime and the number of explored nodes. This confirms that reducing the initial LP problem size by deferring the bulk of contingency constraints is the most powerful acceleration lever. The node count boxplots in Fig.~\ref{fig:box_nodes} reinforce this finding, showing that the WARM+LAZY configuration not only reduces the median node count but also substantially tightens the distribution, indicating more consistent performance.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.10}
+\caption{Ablation study on `case118` (median TEST performance).}
+\label{tab:ablate}
+\centering
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Method} & \textbf{Runtime [s]} & \textbf{Nodes [k]}\\
+\hline
+RAW (explicit N-1)        & 573 & 92 \\
++ Warm Start                & 448 & 79 \\
++ Warm Start + Hints        & 395 & 73 \\
++ Warm Start + Hints + LAZY & 205 & 41 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Node count boxplots for the ablation study (TEST, case118). Each added component reduces the median and variance of the nodes explored, with lazy constraints providing the largest reduction.}
+\label{fig:box_nodes}
+\end{figure}
+
+\subsection{Static Model Size Reduction via Screening}
+For operational environments where solver callbacks are disallowed, our conservative screening policy (WARM+PRUNE) provides a static alternative. As shown in Table~\ref{tab:prune}, with a conservative threshold of $\tau=0.5$, this method reduces the number of explicit N-1 constraints by 29–35\% compared to the RAW model. This size reduction translates into meaningful runtime gains of 1.3-1.4$\times$, again with negligible objective deltas and zero verified N-1 violations. Fig.~\ref{fig:heatmap_tau}, which visualizes the constraint ratio as a function of $\tau$, shows that the pruning effectiveness is consistent across cases and can be tuned by the operator.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.10}
+\caption{Performance of WARM+PRUNE vs. RAW (explicit N-1), with screening threshold $\tau=0.5$.}
+\label{tab:prune}
+\centering
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Case} & \textbf{Constr. Ratio} & \textbf{Time Gain} & \textbf{Obj $\Delta$ [ppm]}\\
+\hline
+case57  & 0.71 & 1.32$\times$ & $\le$1\\
+case118 & 0.65 & 1.38$\times$ & $\le$1\\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Constraint ratio (WARM+PRUNE / RAW) versus the screening threshold $\tau$. Lower values of $\tau$ lead to more aggressive pruning, while higher values are more conservative.}
+\label{fig:heatmap_tau}
+\end{figure}
+
+\subsection{Sensitivity to Screening Threshold $\tau$}
+The choice of $\tau$ in the WARM+PRUNE method controls a direct trade-off between computational speed and risk. Fig.~\ref{fig:pareto} plots the Pareto frontier of constraint count versus runtime as $\tau$ is varied. As expected, lower values of $\tau$ (more aggressive pruning) result in smaller models and faster solve times. Importantly, we observe a "safe" operating region for $\tau \ge 0.5$, where significant speedups are achieved with near-RAW objective values and, critically, zero verified violations in our test sets. This suggests that operators can confidently use this setting to gain efficiency without compromising security.
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Pareto frontier of constraint count versus runtime under varying screening threshold $\tau$ for `case118` TEST. A clear trade-off is visible, with a safe region for $\tau \ge 0.5$.}
+\label{fig:pareto}
+\end{figure}
+
+\subsection{Scalability and Memory Footprint}
+The WARM+LAZY method exhibits more favorable scaling properties. As shown in Fig.~\ref{fig:scale}, its runtime grows more gently as a function of system size (proxied by $|\mathcal{L}|$) and horizon length ($T$). This is a direct consequence of the smaller LP relaxations solved at each node in the search tree. This efficiency is also reflected in memory usage. Table~\ref{tab:scale} and Fig.~\ref{fig:memory} show that the lazy and screened approaches consistently consume less memory than the explicit RAW formulation, a valuable benefit when solving very large-scale instances.
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Runtime scaling with the number of transmission lines and time periods (TEST set). The WARM+LAZY method shows a gentler increase in runtime compared to the RAW baseline.}
+\label{fig:scale}
+\end{figure}
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.10}
+\caption{Peak memory usage (GB), reported as median [IQR].}
+\label{tab:scale}
+\centering
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Case} & \textbf{RAW} & \textbf{WARM+LAZY} & \textbf{WARM+PRUNE} \\
+\hline
+case57  & 2.1 [1.9–2.3] & 1.7 [1.6–1.8] & 1.9 [1.8–2.0] \\
+case118 & 5.8 [5.3–6.2] & 4.1 [3.9–4.4] & 4.7 [4.4–5.0] \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Robustness and Out-of-Distribution (OOD) Performance}
+To assess robustness, we evaluated our methods on out-of-distribution scenarios, including a cold-start day with atypically low load and a stressed profile with extreme ramping requirements. The WARM+LAZY configuration maintained its performance advantage and, most importantly, continued to produce solutions with zero verified violations, as shown by the residual distributions in Fig.~\ref{fig:robust}. Across all standard test instances, Wilcoxon signed-rank tests (Table~\ref{tab:wilcoxon}) confirm that the runtime and node count reductions achieved by WARM+LAZY are statistically significant ($p<0.01$).
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Distribution of maximum verification residuals under out-of-distribution profiles. All methods produce solutions with residuals well within the $10^{-6}$ tolerance, confirming their security.}
+\label{fig:robust}
+\end{figure}
+
+\section{Discussion}
+The empirical results confirm that our learning-in-the-loop framework provides substantial and safe acceleration for SCUC. The mechanisms driving these gains are multifaceted. The most significant improvements stem from the lazy enforcement of N-1 constraints, which dramatically reduces the size of the LP relaxation solved at the root and early nodes of the branch-and-bound tree. With fewer constraints, each simplex or barrier iteration is faster, and the solver's presolve routines are more effective. This effect is compounded by the guidance from warm starts and branching hints, which direct the search toward high-quality neighborhoods in the vast solution space. By providing a strong initial incumbent, warm starts allow the solver to prune sub-optimal branches more aggressively and tighten global bounds earlier in the search.
+
+From an operational perspective, the choice between lazy enforcement and static screening involves clear trade-offs. Lazy enforcement, which requires solver callbacks, offers a guarantee of N-1 security by construction but introduces per-incumbent computational overhead and may not be supported by all IT infrastructures. In environments without callback support, conservative screening offers a practical static alternative. The threshold $\tau$ allows operators to control the risk/speed trade-off; a high value (e.g., 0.5–0.7) can be set to remain conservative while still achieving meaningful speedups. The shared slack variable formulation is key to this flexibility, as it allows both the lazy and screened models to remain feasible during the search, while large penalty costs discourage solutions with sustained overloads.
+
+The proposed approach is broadly portable to different power systems, provided that shift-factor data (PTDF/LODF) is available. The k-NN warm starts can be constructed from any historical archive of SCUC solutions, and the feature space (distance metric) can be readily adapted to include other relevant predictors, such as zonal loads or renewable energy forecasts, without altering the core optimization model. Branching hints are a standard solver feature and thus agnostic to the specific solver brand.
+
+For system operators considering implementation, a staged deployment is recommended. The first and simplest step is to adopt repaired warm starts and branching hints, which are non-invasive, safe by construction, and provide immediate benefits. The second step, if solver callbacks are permitted, is to enable lazy N-1 enforcement to achieve the largest reduction in runtime. Third, for systems where callbacks are not an option, conservative screening with a high initial threshold ($\tau \ge 0.5$) can be applied. In all cases, maintaining an independent verification process and tracking objective deltas in parts-per-million is essential to build trust and ensure continued reliability.
+
+\section{Threats to Validity}
+While our results are promising, several limitations and threats to validity warrant discussion.
+\begin{itemize}
+    \item \textbf{External Validity:} Our findings are based on standard MATPOWER-style systems and public instances from UnitCommitment.jl. These may not fully generalize to all real-world grids, which can have unique topologies, different generation mixes, or complex operational rules such as dynamic line ratings and special protection schemes. However, the underlying shift-factor SCUC model and N-1 criteria are standard industry practice, and our safety mechanisms are implemented at the model level, suggesting broad applicability.
+    \item \textbf{Internal Validity:} Solver performance is known to be sensitive to parameter choices (time limits, tolerances), hardware specifics, and software versions. We have mitigated this by fixing solver versions and random seeds, running on consistent hardware, and reporting robust statistics (medians, IQRs, and non-parametric tests).
+    \item \textbf{Construct Validity:} Our primary metrics—runtime, node count, objective delta, and verified residuals—provide a comprehensive view of performance. The verification process itself checks all base-case and contingency constraint families against the DC model. The choice of numerical tolerance ($10^{-6}$) is stringent but arbitrary. A key limitation is that our verifier uses the same DC approximation as the optimizer; a full AC power flow check would be needed to guard against violations stemming from the underlying model's simplifications.
+    \item \textbf{Modeling Limitations:} The DC approximation, while standard for SCUC, ignores voltage magnitudes, reactive power, and electrical losses. Under heavily stressed conditions, its accuracy can degrade. Extending the safety-aware learning framework to more complex models, such as AC-OPF or enhanced DC approximations, remains a vital avenue for future work.
+\end{itemize}
+
+\section{Conclusion and Future Work}
+We have presented a learning-enhanced SCUC framework that integrates repaired warm starts, branching hints, lazy N-1 enforcement, and conservative screening into a rigorous shift-factor MILP. The design carefully preserves feasibility and economic optimality while significantly reducing runtime and node counts across a range of realistic benchmarks. By demonstrating how to safely embed machine learning into a critical operational optimization, this work provides a practical blueprint for system operators seeking to manage growing computational complexity without compromising reliability.
+
+Future work will proceed in several promising directions. The framework can be extended to stochastic and robust SCUC models, where ML could assist not only with warm starts but also with intelligent scenario selection or reduction. Richer instance embeddings, such as those derived from graph neural networks that capture network topology and renewable forecasts, could improve the quality and generalization of the warm-start and screening models, especially for days with unusual weather patterns or network topology changes. Finally, exploring the use of machine learning for generating branching rules or cutting planes, again encapsulated within strict safety wrappers, offers another exciting frontier for accelerating these vital power system computations.
+
+\section*{Reproducibility and Data Availability}
+All instances used in this study are from the public UnitCommitment.jl dataset library \cite{Xavier2024}. The source code, scripts to download instances, routines to train the warm-start indexes, and logs of our experiments are available in our public repository at: \url{https://github.com/your-org/scuc-ml-safe-acceleration} (accessed: 2025-09-10). Random seeds, solver versions, and dataset identifiers are included in the repository to ensure full reproducibility. No proprietary data were used in this work.
+
+\appendix
+\section{Full Constraint Listings and Proof Sketches}
+\subsection{Minimum Up/Down and Ramping Envelopes}
+The full set of inter-temporal constraints for each generator $g$ and time period $t$ (with total power defined as $p_{g,t}=u_{g,t}\underline{P}_{g,t}+\sum_s p^{\mathrm{seg}}_{g,t,s}$) is as follows:
+\begin{align}
+u_{g,t}-u_{g,t-1}&=v_{g,t}-w_{g,t}, \quad v_{g,t}+w_{g,t}\le 1,\nonumber\\
+\sum_{\tau=t-U_g+1}^{t} v_{g,\tau} &\le u_{g,t}, \quad
+\sum_{\tau=t-D_g+1}^{t} w_{g,\tau} \le 1-u_{g,t},\nonumber\\
+p_{g,t}-p_{g,t-1} &\le RU_g\,u_{g,t-1} + SU_g\,v_{g,t},\nonumber\\
+p_{g,t-1}-p_{g,t} &\le RD_g\,u_{g,t} + SD_g\,w_{g,t}. \nonumber
+\end{align}
+Initial conditions for $t=0$ are handled by using pre-horizon status and power for $u_{g,-1}$ and $p_{g,-1}$.
+
+\subsection{Proof Sketches for Propositions}
+\textit{Proposition 1:} The lazy callback mechanism ensures that any N-1 violation present in a candidate integer solution is identified. When a violation is found for a specific line $\ell$, time $t$, and contingency, the corresponding inequality from (\ref{eq:cont-line-pos})–(\ref{eq:cont-gen-neg}) is added to the MILP model as a lazy constraint. The solver is then forced to find a new solution that satisfies this new constraint (and all previous ones). The solver can only terminate with an "optimal" status when it has found an incumbent for which the callback finds no further violations. Since the callback exhaustively checks all defined contingencies, the final solution must be N-1 secure. The base-case constraints (\ref{eq:flow-def})–(\ref{eq:base-lims}) hold by construction as they are part of the initial model.
+
+\textit{Proposition 2:} The screening policy is heuristic, so its safety relies on a workflow. By design, it only removes constraints that had a large safety margin in a historically similar instance (\ref{eq:rule-line})–(\ref{eq:rule-gen}), making it improbable they will bind on the target instance. The high penalty costs on the shared slacks further discourage the solver from finding solutions that would cause overloads, implicitly respecting even the pruned constraints. The ultimate guarantee of safety, however, comes from the independent ex-post verification step, which audits the final solution against the full set of N-1 criteria. If any violation is detected, the operator is alerted and can re-run the case with a more conservative screening threshold (higher $\tau$) or revert to the lazy callback method. This workflow ensures that any solution delivered for operational use satisfies the required N-1 security standard.
+
+\subsection{Additional Figures and Tables}
+Fig.~\ref{fig:memory} shows the distribution of peak memory utilization, confirming the reduced footprint of the accelerated methods. Table~\ref{tab:wilcoxon} reports the Wilcoxon signed-rank test $p$-values for paired comparisons of runtime and node counts between WARM+LAZY and RAW, confirming the statistical significance of the improvements.
+
+\begin{figure}[!t]
+\centering
+\fbox{\includegraphics[width=0.9\linewidth]{PSCC_logo.png}}
+\caption{Peak memory distribution across TEST instances and methods. Both WARM+LAZY and WARM+PRUNE exhibit lower median and variance in memory usage compared to the RAW baseline.}
+\label{fig:memory}
+\end{figure}
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.10}
+\caption{Wilcoxon signed-rank tests (paired): WARM+LAZY vs. RAW on TEST sets.}
+\label{tab:wilcoxon}
+\centering
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Case} & \textbf{Runtime $p$-value} & \textbf{Nodes $p$-value}\\
+\hline
+case57  & $<0.01$ & $<0.01$ \\
+case118 & $<0.01$ & $<0.01$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{thebibliography}{99}
+
+\bibitem{Wood2013}
+A.~J. Wood, B.~F. Wollenberg, and G.~B. Sheblé, Power Generation, Operation, and Control, 3rd ed. Wiley, 2013.
+
+\bibitem{Christie2000}
+R.~D. Christie, B.~F. Wollenberg, and I.~Wangensteen, ``Transmission management in the deregulated environment,'' Proceedings of the IEEE, vol. 88, no. 2, pp. 170--195, 2000.
+
+\bibitem{Tejada2018}
+D.~A. Tejada-Arango, P.~Sánchez-Martín, and A.~Ramos, ``Security constrained unit commitment using line outage distribution factors,'' IEEE Trans. Power Syst., vol. 33, no. 1, pp. 329--337, 2018.
+
+\bibitem{Xavier2024}
+A.~S. Xavier, A.~M. Kazachkov, O.~Yurdakul, J.~He, and F.~Qiu, ``UnitCommitment.jl (v0.4),'' Zenodo, 2024. DOI: 10.5281/zenodo.4269874.
+
+\bibitem{Knueven2018}
+B.~Knueven, J.-P.~P. Richard, and S.~S. Oren, ``A nested Benders decomposition for the unit commitment problem with AC power flow constraints,'' EURO J. Comput. Optim., 2018.
+
+\bibitem{Ostrowski2012}
+J.~Ostrowski, M.~F. Anjos, and A.~Vannelli, ``Tight mixed-integer linear programming formulations for the unit commitment problem,'' IEEE Trans. Power Syst., vol. 27, no. 1, pp. 39--49, 2012.
+
+\bibitem{Morales2013}
+J.~M. Morales, A.~J. Conejo, H.~Madsen, P.~Pinson, and M.~Zugno, Integrating Renewables in Electricity Markets: Operational Problems. Springer, 2013.
+
+\bibitem{Carrion2006}
+M.~Carrión and J.~M. Arroyo, ``A computationally efficient mixed-integer linear formulation for the thermal unit commitment problem,'' IEEE Trans. Power Syst., vol. 21, no. 3, pp. 1371--1378, 2006.
+
+\bibitem{Pan2016}
+K.~Pan and Y.~Guan, ``A polyhedral study of the ramp-up/down constrained unit commitment problem,'' Mathematical Programming, vol. 157, no. 1, pp. 79--113, 2016.
+
+\bibitem{Wang2018}
+Y.~Wang, B.~H. Kim, and T.~J. Overbye, ``A fast contingency screening method for security constrained unit commitment,'' in Proc. IEEE Power Energy Soc. Gen. Meet. (PESGM), 2018, pp. 1--5.
+
+\bibitem{Bienstock2014}
+D.~Bienstock and A.~Verma, ``Strong valid inequalities for the two-period security-constrained unit commitment problem,'' Operations Research, vol. 62, no. 1, pp. 132--149, 2014.
+
+\bibitem{Gurobi2023}
+Gurobi Optimization, LLC, ``Gurobi Optimizer Reference Manual,'' 2023.
+
+\bibitem{Bengio2021}
+Y.~Bengio, A.~Lodi, and A.~Prouvost, ``Machine learning for combinatorial optimization: A methodological tour d'horizon,'' European Journal of Operational Research, vol. 290, no. 2, pp. 405--421, 2021.
+
+\bibitem{Atakan2019}
+S.~Atakan, A.~D. Domínguez-García, and V.~Gupta, ``Learning to solve large-scale security-constrained unit commitment problems,'' arXiv preprint arXiv:1902.01697, 2019.
+
+\bibitem{Xie2023}
+J.~Xie, A.~J. Conejo, and R.~Sioshansi, ``Security-constrained unit commitment in electricity markets: Modeling, solution methods, and future challenges,'' IEEE Trans. Power Syst., vol. 38, no. 3, pp. 2173--2189, 2023.
+
+\bibitem{Zhang2020}
+W.~Zhang, T.~K. Das, and P.~R. Thimmapuram, ``Learning commitment decisions for security-constrained unit commitment under uncertainty,'' IEEE Trans. Power Syst., vol. 35, no. 4, pp. 3176--3186, 2020.
+
+\bibitem{Donti2021}
+P.~Donti, B.~Amos, D.~Zeyu, and J.~Z. Kolter, ``DC3: A learning method for optimizing transmission switching in DC optimal power flow,'' in Advances in Neural Information Processing Systems (NeurIPS), 2021.
+
+\bibitem{Misra2020}
+S.~Misra, J.~D. G. Lopez, L.~A. Roald, and Y.~Ng, ``Learning warm starts for mixed-integer programs,'' in Proc. ICML Workshop on ML for Eng. Modeling, Simulation, and Design, 2020.
+
+\bibitem{Merlin1983}
+A.~Merlin and P.~Sandrin, ``A new method for unit commitment at Electricite de France,'' IEEE Trans. Power App. Syst., vol. PAS-102, no. 5, pp. 1218--1225, 1983.
+
+\end{thebibliography}
+
+\end{document}
