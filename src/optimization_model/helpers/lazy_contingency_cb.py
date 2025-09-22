@@ -21,42 +21,24 @@ class LazyContingencyConfig:
     # Logging
     verbose: bool = True
 
+    # Optional bandit policy (object with choose_k(context)->int, update(chosen_k,reward,context)->None)
+    topk_policy: object = None
+
 
 def attach_lazy_contingency_callback(
     model: gp.Model, scenario, config: Optional[LazyContingencyConfig] = None
 ) -> None:
     """
     Register a Gurobi callback that enforces N-1 contingency constraints lazily.
-
-    Pre-conditions:
-      - The model must already contain:
-          * line_flow[l,t] (free)
-          * cont_overflow_pos[l,t] >= 0
-          * cont_overflow_neg[l,t] >= 0
-      - Base-case PTDF (ISF) flow equalities and base flow limits are already in the model.
-      - Startup/shutdown, ramping, reserves, etc., are as in your standard SCUC.
-
-    What the callback does (at each new incumbent MIPSOL):
-      - Read incumbent solution values for:
-          * line_flow[l,t]
-          * commit[g,t], gen_segment_power[g,t,s]
-      - Compute post-contingency flows using LODF (line outages) and ISF (generator outages).
-      - If any post flow exceeds the emergency limit (by violation_tol), add the corresponding
-        +/- lazy constraint(s) using model.cbLazy(...). These constraints use the shared
-        contingency slack variables cont_overflow_pos/neg, so feasibility remains soft but penalized.
-      - If add_top_k > 0, only add the most violated K constraints per incumbent to keep the LP compact.
-
-    Optimality and security:
-      - The callback checks all defined contingencies; any violating incumbent will trigger lazy
-        constraints, so the final accepted solution satisfies all N-1 constraints (up to tolerance).
+    With optional bandit for adaptive top-k control.
     """
     cfg = config or LazyContingencyConfig()
 
-    # Short-circuit if no contingencies or lines
-    if not getattr(scenario, "contingencies", None) or not getattr(scenario, "lines", None):
+    if not getattr(scenario, "contingencies", None) or not getattr(
+        scenario, "lines", None
+    ):
         return
 
-    # Pull var handles
     commit = getattr(model, "commit", None)
     seg = getattr(model, "gen_segment_power", None)
     line_flow = getattr(model, "line_flow", None)
@@ -68,7 +50,6 @@ def attach_lazy_contingency_callback(
             "[lazy_cont] Model is missing required variables (commit, seg, line_flow, cont_overflow_*)."
         )
 
-    # Precompute sparse accessors and mappings
     lodf_csc: csc_matrix = scenario.lodf.tocsc()
     isf_csc: csc_matrix = scenario.isf.tocsc()
 
@@ -80,7 +61,6 @@ def attach_lazy_contingency_callback(
     col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
     line_by_row = {ln.index - 1: ln for ln in lines}
 
-    # Stats
     stats = {"incumbents_seen": 0, "lazy_added": 0}
 
     def _p_expr(gen, t: int) -> gp.LinExpr:
@@ -96,8 +76,6 @@ def attach_lazy_contingency_callback(
 
         stats["incumbents_seen"] += 1
 
-        # Read current incumbent values
-        # Base flows f[line,t]
         f_val: Dict[Tuple[str, int], float] = {}
         for ln in lines:
             for t in range(T):
@@ -106,7 +84,6 @@ def attach_lazy_contingency_callback(
                 except Exception:
                     f_val[(ln.name, t)] = 0.0
 
-        # Generator total power p[gen,t] = u*min + sum(seg)
         p_val: Dict[Tuple[str, int], float] = {}
         for gen in scenario.thermal_units:
             nS = len(gen.segments) if gen.segments else 0
@@ -126,12 +103,10 @@ def attach_lazy_contingency_callback(
                     base += ssum
                 p_val[(gen.name, t)] = base
 
-        # Collect violations
-        # Entry: (viol_amount, 'line'/'gen', +1/-1, line_l, out_obj, t, coeff)
         viols: List[Tuple[float, str, int, object, object, int, float]] = []
 
-        # Line-outages via LODF
-        for cont in (scenario.contingencies or []):
+        # Line-outages
+        for cont in scenario.contingencies or []:
             if not cont.lines:
                 continue
             for out_line in cont.lines:
@@ -148,23 +123,29 @@ def attach_lazy_contingency_callback(
                     if line_l is None:
                         continue
                     for t in range(T):
-                        post = f_val[(line_l.name, t)] + float(alpha) * f_val[(out_line.name, t)]
+                        post = (
+                            f_val[(line_l.name, t)]
+                            + float(alpha) * f_val[(out_line.name, t)]
+                        )
                         F_em = float(line_l.emergency_limit[t])
                         vpos = post - F_em
                         vneg = -post - F_em
                         if vpos > cfg.violation_tol:
-                            viols.append((vpos, "line", +1, line_l, out_line, t, float(alpha)))
+                            viols.append(
+                                (vpos, "line", +1, line_l, out_line, t, float(alpha))
+                            )
                         if vneg > cfg.violation_tol:
-                            viols.append((vneg, "line", -1, line_l, out_line, t, float(alpha)))
+                            viols.append(
+                                (vneg, "line", -1, line_l, out_line, t, float(alpha))
+                            )
 
-        # Gen-outages via ISF
-        for cont in (scenario.contingencies or []):
+        # Gen-outages
+        for cont in scenario.contingencies or []:
             if not getattr(cont, "units", None):
                 continue
             for gen in cont.units:
                 bidx = gen.bus.index
                 if bidx == ref_1b or bidx not in col_by_bus_1b:
-                    # ISF = 0; post = f_l
                     for line_l in lines:
                         for t in range(T):
                             post = f_val[(line_l.name, t)]
@@ -197,69 +178,79 @@ def attach_lazy_contingency_callback(
         if not viols:
             return
 
-        # Rank by severity and optionally cap
+        # Rank violations by severity
         viols.sort(key=lambda x: x[0], reverse=True)
-        if cfg.add_top_k and cfg.add_top_k > 0:
-            viols = viols[: cfg.add_top_k]
 
-        # Add lazy constraints
+        # Adaptive top-K via bandit policy (optional)
+        eff_top_k = int(cfg.add_top_k) if cfg.add_top_k and cfg.add_top_k > 0 else 0
+        if getattr(cfg, "topk_policy", None) is not None:
+            try:
+                context = {
+                    "violations": len(viols),
+                    "incumbents": stats["incumbents_seen"],
+                }
+                chosen = int(cfg.topk_policy.choose_k(context))
+                eff_top_k = max(0, chosen)
+            except Exception:
+                pass
+
+        if eff_top_k > 0:
+            viols = viols[:eff_top_k]
+
         added = 0
         for _, kind, sign, line_l, out_obj, t, coeff in viols:
             if kind == "line":
-                # +/-: f_l +/- coeff f_out <= F_em + cont_over
                 if sign > 0:
                     m.cbLazy(
-                        line_flow[line_l.name, t]
-                        + coeff * line_flow[out_obj.name, t]
+                        line_flow[line_l.name, t] + coeff * line_flow[out_obj.name, t]
                         <= float(line_l.emergency_limit[t]) + covp[line_l.name, t]
                     )
                 else:
                     m.cbLazy(
-                        -line_flow[line_l.name, t]
-                        - coeff * line_flow[out_obj.name, t]
+                        -line_flow[line_l.name, t] - coeff * line_flow[out_obj.name, t]
                         <= float(line_l.emergency_limit[t]) + covn[line_l.name, t]
                     )
             else:
-                # gen-outage: f_l -/+ coeff * p_expr <= F_em + cont_over
                 pexpr = _p_expr(out_obj, t)
                 if sign > 0:
                     m.cbLazy(
-                        line_flow[line_l.name, t]
-                        - coeff * pexpr
+                        line_flow[line_l.name, t] - coeff * pexpr
                         <= float(line_l.emergency_limit[t]) + covp[line_l.name, t]
                     )
                 else:
                     m.cbLazy(
-                        -line_flow[line_l.name, t]
-                        + coeff * pexpr
+                        -line_flow[line_l.name, t] + coeff * pexpr
                         <= float(line_l.emergency_limit[t]) + covn[line_l.name, t]
                     )
             added += 1
 
         stats["lazy_added"] += added
-        if cfg.verbose:
+        # Bandit update with heuristic reward (prefer lower additions)
+        if getattr(cfg, "topk_policy", None) is not None:
             try:
-                m.cbMessage(f"[lazy_cont] MIPSOL#{stats['incumbents_seen']}: added {added} lazy constraints (total={stats['lazy_added']}).\n")
+                cfg.topk_policy.update(
+                    chosen_k=eff_top_k,
+                    reward=float(-added),
+                    context={"violations": len(viols)},
+                )
             except Exception:
                 pass
 
-    # Attach and set LazyConstraints=1
+        if cfg.verbose:
+            try:
+                m.cbMessage(
+                    f"[lazy_cont] MIPSOL#{stats['incumbents_seen']}: added {added} lazy constraints (total={stats['lazy_added']}).\n"
+                )
+            except Exception:
+                pass
+
     try:
         model.Params.LazyConstraints = 1
     except Exception:
         pass
-    model._lazy_contingency_cfg = cfg  # keep for inspection
+    model._lazy_contingency_cfg = cfg
     model._lazy_contingency_stats = stats
     model._lazy_contingency_callback = _cb
     model._lazy_contingency_attached = True
-    model._current_scenario_name = getattr(scenario, "name", "scenario")
-    model._scenario_time_steps = getattr(scenario, "time", 0)
-    model._scenario_lines = len(getattr(scenario, "lines", []))
-    model._scenario_contingencies = len(getattr(scenario, "contingencies", []))
-    model._scenario_ref_bus_1b = getattr(scenario, "ptdf_ref_bus_index", None)
-    model._scenario_isf_nnz = int(getattr(scenario.isf, "nnz", 0))
-    model._scenario_lodf_nnz = int(getattr(scenario.lodf, "nnz", 0))
-
     model._callback = _cb
     model._has_callback = True
-    # Note: model.optimize() must be called after this; Gurobi will invoke _cb.

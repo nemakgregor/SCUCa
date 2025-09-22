@@ -8,8 +8,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
+import glob
 import psutil
 from gurobipy import GRB
 from tqdm import tqdm
@@ -36,20 +37,25 @@ from src.optimization_model.helpers.save_json_solution import (
 )
 from src.optimization_model.helpers.verify_solution import verify_solution
 
+# ML modules
+from src.ml_models.commitment_hints import CommitmentHints
+from src.ml_models.gnn_screening import GNNLineScreener
+from src.ml_models.gru_warmstart import GRUDispatchWarmStart
+from src.ml_models.bandits import EpsilonGreedyTopK
+
+logger = logging.getLogger(__name__)
+
 
 def _configure_logging():
     """
     Make logs readable and avoid duplicate gurobipy messages.
     """
-    # Configure root logger if nobody did it yet
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=logging.INFO,
             format="%(levelname)s:%(name)s:%(message)s",
         )
-    # Silence Python-side gurobipy log (Gurobi still prints its own single line to console)
     logging.getLogger("gurobipy").setLevel(logging.WARNING)
-    # Quiet common HTTP libs
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
 
@@ -79,6 +85,25 @@ def _list_case_instances(case_folder: str) -> List[str]:
         items = list_local_cached_instances(include_filters=[cf])
         items = [x for x in items if _belongs(x)]
     return sorted(set(items))
+
+
+def _discover_cases_from_outputs() -> List[str]:
+    """
+    Discover case folders from existing JSON solutions under src/data/output.
+    Returns a list like ["matpower/case14", "matpower/case118"].
+    """
+    base = DataParams._OUTPUT.resolve()
+    cases: set = set()
+    if base.exists():
+        for p in base.rglob("*.json"):
+            try:
+                rel = p.resolve().relative_to(base).as_posix()
+            except Exception:
+                continue
+            parts = rel.split("/")
+            if len(parts) >= 3:
+                cases.add("/".join(parts[:2]))
+    return sorted(cases)
 
 
 def _split_instances(
@@ -143,14 +168,36 @@ class PeakMemSampler:
 
 @dataclass
 class RunConfig:
+    # Base mode
     mode: str  # RAW | WARM | WARM+HINTS | WARM+LAZY | WARM+PRUNE
     tau: Optional[float] = None  # for WARM+PRUNE
+
+    # Solver controls
     time_limit: int = 600
     mip_gap: float = 0.05
+
+    # Lazy settings
     lazy_top_k: int = 0
     lazy_lodf_tol: float = 1e-4
     lazy_isf_tol: float = 1e-8
     lazy_viol_tol: float = 1e-6
+
+    # ML feature toggles for this specific run
+    use_commit_hints: bool = False
+    commit_mode: str = "hint"
+    commit_thr: float = 0.98
+    commit_on_raw: bool = False
+
+    use_gnn_screen: bool = False
+    gnn_thr: float = 0.60
+
+    use_gru_warm: bool = False
+
+    use_adaptive_topk: bool = False
+    topk_candidates: Optional[List[int]] = None
+    topk_epsilon: float = 0.1
+
+    # Logs
     save_human_logs: bool = False
 
 
@@ -298,23 +345,56 @@ def _status_str(code: int) -> str:
     return DataParams.SOLVER_STATUS_STR.get(code, f"STATUS_{code}")
 
 
+def _build_mode_label(base: str, cfg: RunConfig) -> str:
+    """
+    Build a human-readable mode label with feature suffixes, e.g.:
+      - RAW+GNN
+      - WARM+HINTS+COMMIT
+      - WARM+LAZY+K128
+      - WARM+LAZY+BANDIT+COMMIT
+      - WARM+PRUNE-0.50+GNN
+    """
+    parts = [base]
+    # Tau for PRUNE
+    if base == "WARM+PRUNE" and (cfg.tau is not None):
+        parts[-1] = f"{base}-{cfg.tau:.2f}"
+    # Feature suffixes
+    if cfg.use_gnn_screen and base != "WARM+LAZY":  # GNN ignored for LAZY
+        parts.append("GNN")
+    if cfg.use_commit_hints:
+        parts.append("COMMIT")
+    if cfg.use_gru_warm:
+        parts.append("GRU")
+    if base == "WARM+LAZY":
+        if cfg.use_adaptive_topk:
+            parts.append("BANDIT")
+        elif cfg.lazy_top_k and cfg.lazy_top_k > 0:
+            parts.append(f"K{int(cfg.lazy_top_k)}")
+    return "+".join(parts)
+
+
 def solve_one(
     instance_name: str,
     mode_cfg: RunConfig,
     wsp: Optional[WarmStartProvider],
     rc: Optional[RCProvider],
     use_train_db_for_rc: bool,
+    args: argparse.Namespace,
 ) -> Dict:
     started_at = time.time()
-    # quiet=True suppresses download progress bars now
     inst = read_benchmark(instance_name, quiet=True)
     sc = inst.deterministic
 
-    # Prepare pruning predicate (PRUNE only)
-    cont_filter = None
+    # Build final label now for logging
+    mode_label = _build_mode_label(mode_cfg.mode, mode_cfg)
+    tqdm.write(f"[run] {instance_name} | {mode_label}")
+    logger.info("Solving %s with %s", instance_name, mode_label)
+
+    # Redundancy pruning predicate (PRUNE only; explicit models)
+    rc_pred = None
     if mode_cfg.mode.startswith("WARM+PRUNE"):
         tau = 0.5 if mode_cfg.tau is None else float(mode_cfg.tau)
-        cont_filter = _build_contingency_filter(
+        rc_pred = _build_contingency_filter(
             rc,
             sc,
             instance_name,
@@ -323,7 +403,47 @@ def solve_one(
             use_train_db=use_train_db_for_rc,
         )
 
-    # Build model with lazy flag only when mode is LAZY
+    # GNN screening — explicit models only (RAW, WARM, WARM+PRUNE)
+    gnn_pred = None
+    if mode_cfg.mode != "WARM+LAZY" and bool(mode_cfg.use_gnn_screen):
+        try:
+            case_folder = "/".join(instance_name.split("/")[:2])
+            gnn = GNNLineScreener(case_folder=case_folder)
+            if gnn.ensure_trained():
+                gnn_pred = gnn.make_pruning_predicate(
+                    sc, thr_pred=float(mode_cfg.gnn_thr)
+                )
+        except Exception:
+            gnn_pred = None
+
+    # Combine predicates if both available (safer)
+    def _combine_pred(kind, line_l, out_obj, t, coeff, F_em):
+        ok_rc = (
+            True
+            if rc_pred is None
+            else bool(rc_pred(kind, line_l, out_obj, t, coeff, F_em))
+        )
+        ok_gn = (
+            True
+            if gnn_pred is None
+            else bool(gnn_pred(kind, line_l, out_obj, t, coeff, F_em))
+        )
+        return ok_rc and ok_gn
+
+    # Final predicate for explicit runs
+    cont_filter = None
+    if mode_cfg.mode == "RAW":
+        cont_filter = gnn_pred
+    elif mode_cfg.mode == "WARM":
+        cont_filter = gnn_pred
+    elif mode_cfg.mode == "WARM+HINTS":
+        cont_filter = gnn_pred
+    elif mode_cfg.mode == "WARM+PRUNE":
+        cont_filter = (
+            _combine_pred if (rc_pred is not None or gnn_pred is not None) else None
+        )
+
+    # Build model with or without lazy contingencies
     use_lazy = mode_cfg.mode == "WARM+LAZY"
     model = build_model(
         scenario=sc,
@@ -335,7 +455,7 @@ def solve_one(
     num_vars_root = int(getattr(model, "NumVars", 0))
     num_constrs_root = int(getattr(model, "NumConstrs", 0))
 
-    # Apply warm starts (all WARM* modes)
+    # Apply warm starts (WARM-family)
     applied_starts = 0
     if mode_cfg.mode in ("WARM", "WARM+HINTS", "WARM+LAZY", "WARM+PRUNE"):
         if wsp is not None:
@@ -355,7 +475,41 @@ def solve_one(
             except Exception:
                 applied_starts = 0
 
-    # Branching hints only for WARM+HINTS, WARM+LAZY, WARM+PRUNE
+    # Commitment hints (if requested)
+    if bool(mode_cfg.use_commit_hints) and (
+        mode_cfg.mode in ("WARM", "WARM+HINTS", "WARM+LAZY", "WARM+PRUNE")
+        or (mode_cfg.mode == "RAW" and bool(mode_cfg.commit_on_raw))
+    ):
+        try:
+            case_folder = "/".join(instance_name.split("/")[:2])
+            ch = CommitmentHints(case_folder=case_folder)
+            if ch.ensure_trained():
+                _ = ch.apply_to_model(
+                    model,
+                    sc,
+                    instance_name,
+                    thr=float(mode_cfg.commit_thr),
+                    mode=str(mode_cfg.commit_mode),
+                )
+        except Exception:
+            pass
+
+    # GRU-based dispatch warm start (if requested)
+    if bool(mode_cfg.use_gru_warm) and mode_cfg.mode in (
+        "WARM",
+        "WARM+HINTS",
+        "WARM+LAZY",
+        "WARM+PRUNE",
+    ):
+        try:
+            case_folder = "/".join(instance_name.split("/")[:2])
+            gw = GRUDispatchWarmStart(case_folder=case_folder)
+            if gw.ensure_trained():
+                _ = gw.apply_to_model(model, sc)
+        except Exception:
+            pass
+
+    # Branching hints from Start values (for HINTS/LAZY/PRUNE modes)
     hints_applied = 0
     if mode_cfg.mode in ("WARM+HINTS", "WARM+LAZY", "WARM+PRUNE"):
         try:
@@ -363,7 +517,7 @@ def solve_one(
         except Exception:
             hints_applied = 0
 
-    # Attach lazy callback for LAZY
+    # Attach lazy callback for LAZY; optionally bandit for adaptive top-k
     if use_lazy and sc.contingencies:
         cfg = LazyContingencyConfig(
             lodf_tol=mode_cfg.lazy_lodf_tol,
@@ -374,6 +528,15 @@ def solve_one(
             else 0,
             verbose=True,
         )
+        if bool(mode_cfg.use_adaptive_topk):
+            try:
+                pol = EpsilonGreedyTopK(
+                    K_list=(mode_cfg.topk_candidates or [64, 128, 256]),
+                    epsilon=float(mode_cfg.topk_epsilon),
+                )
+                cfg.topk_policy = pol
+            except Exception:
+                pass
         attach_lazy_contingency_callback(model, sc, cfg)
 
     # Solver params
@@ -387,12 +550,12 @@ def solve_one(
     except Exception:
         pass
 
-    # Memory sampling + optimize
+    # Optimize with memory sampler
     with PeakMemSampler(interval_sec=0.2) as mems:
         model.optimize()
         peak_mem_gb = mems.peak_gb
 
-    # Save JSON for ML indexes and provenance
+    # Save JSON solution
     try:
         save_solution_as_json(sc, model, instance_name=instance_name)
     except Exception:
@@ -478,13 +641,10 @@ def solve_one(
     finished_at = time.time()
 
     return {
-        # Use timezone-aware UTC timestamp (fixes deprecation warning)
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "instance_name": instance_name,
         "case_folder": "/".join(instance_name.split("/")[:2]),
-        "mode": mode_cfg.mode
-        if mode_cfg.tau is None
-        else f"{mode_cfg.mode}-{mode_cfg.tau:.2f}",
+        "mode": mode_label,  # include suffixes for clarity
         "tau": "" if mode_cfg.tau is None else f"{mode_cfg.tau:.2f}",
         "status": _status_str(status_code),
         "status_code": status_code,
@@ -593,6 +753,151 @@ def _append_csv(path: Path, row: Dict) -> None:
         )
 
 
+def _auto_mode_list(args: argparse.Namespace) -> List[RunConfig]:
+    """
+    Compose a compact but comprehensive set of combinations to exercise
+    all developed ML modules with reasonable coverage.
+    """
+    TL = args.time_limit
+    MG = args.mip_gap
+    Kcands = args.adv_topk_candidates or [64, 128, 256]
+    modes: List[RunConfig] = []
+
+    # Baselines and explicit-screening variants
+    modes.append(RunConfig(mode="RAW", time_limit=TL, mip_gap=MG))
+    modes.append(
+        RunConfig(mode="RAW", time_limit=TL, mip_gap=MG, use_gnn_screen=True)
+    )  # RAW+GNN
+    modes.append(
+        RunConfig(
+            mode="RAW",
+            time_limit=TL,
+            mip_gap=MG,
+            use_commit_hints=True,
+            commit_on_raw=True,
+        )
+    )  # RAW+COMMIT
+
+    # Warm start family (no constraints screening)
+    modes.append(RunConfig(mode="WARM", time_limit=TL, mip_gap=MG))
+    modes.append(RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG))
+    modes.append(
+        RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG, use_gru_warm=True)
+    )  # +GRU
+    modes.append(
+        RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG, use_commit_hints=True)
+    )  # +COMMIT
+    modes.append(
+        RunConfig(
+            mode="WARM+HINTS",
+            time_limit=TL,
+            mip_gap=MG,
+            use_commit_hints=True,
+            use_gru_warm=True,
+        )
+    )  # +COMMIT+GRU
+
+    # Lazy N-1
+    modes.append(
+        RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=0)
+    )  # all violated
+    modes.append(
+        RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=128)
+    )  # K128
+    modes.append(
+        RunConfig(
+            mode="WARM+LAZY",
+            time_limit=TL,
+            mip_gap=MG,
+            use_adaptive_topk=True,
+            topk_candidates=Kcands,
+            topk_epsilon=args.adv_topk_epsilon,
+        )
+    )  # bandit
+    modes.append(
+        RunConfig(
+            mode="WARM+LAZY",
+            time_limit=TL,
+            mip_gap=MG,
+            lazy_top_k=0,
+            use_commit_hints=True,
+        )
+    )  # LAZY+COMMIT
+    modes.append(
+        RunConfig(
+            mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=0, use_gru_warm=True
+        )
+    )  # LAZY+GRU
+
+    # Screening/PRUNE (kNN) with tau sweep, with and without GNN
+    for tau in args.taus or [0.3, 0.5, 0.7]:
+        modes.append(
+            RunConfig(mode="WARM+PRUNE", tau=float(tau), time_limit=TL, mip_gap=MG)
+        )
+        modes.append(
+            RunConfig(
+                mode="WARM+PRUNE",
+                tau=float(tau),
+                time_limit=TL,
+                mip_gap=MG,
+                use_gnn_screen=True,
+            )
+        )  # PRUNE+GNN
+
+    return modes
+
+
+def _load_skip_solved_keys(
+    logs: List[Path],
+    require_ok: bool = False,
+    strict_status: bool = False,
+) -> Tuple[Set[Tuple[str, str]], Set[str]]:
+    """
+    Read (instance_name, mode) pairs from one or more CSV logs to skip in future runs.
+    Returns:
+      - keys_mode: set of (instance_name, mode_label)
+      - keys_inst: set of instance_name (for per-instance skipping)
+    A row is considered 'solved' if:
+      - strict_status=True  -> status == OPTIMAL
+      - strict_status=False -> status in {OPTIMAL, SUBOPTIMAL, TIME_LIMIT}
+    Additionally, if require_ok=True we also require violations == 'OK' (or feasible_ok == 'OK' if violations missing).
+    """
+    ok_status = {"OPTIMAL"} if strict_status else {"OPTIMAL", "SUBOPTIMAL", "TIME_LIMIT"}
+    keys_mode: Set[Tuple[str, str]] = set()
+    keys_inst: Set[str] = set()
+    for p in logs:
+        if not p or not Path(p).is_file():
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                rd = csv.DictReader(fh)
+                for row in rd:
+                    inst = (row.get("instance_name") or "").strip()
+                    mode = (row.get("mode") or "").strip()
+                    status = (row.get("status") or "").strip().upper()
+                    if not inst or not mode:
+                        continue
+                    if status not in ok_status:
+                        continue
+                    if require_ok:
+                        vio = (row.get("violations") or "").strip()
+                        feas = (row.get("feasible_ok") or "").strip()
+                        if not (vio == "OK" or feas == "OK"):
+                            continue
+                    keys_mode.add((inst, mode))
+                    keys_inst.add(inst)
+        except Exception:
+            continue
+    return keys_mode, keys_inst
+
+
+def _collect_skip_logs(paths_from_cli: List[str]) -> List[Path]:
+    if paths_from_cli:
+        return [Path(p) for p in paths_from_cli]
+    # default: scan results/raw_logs/*.csv
+    return [Path(p) for p in glob.glob(str(Path("results") / "raw_logs" / "*.csv"))]
+
+
 def main():
     _configure_logging()
 
@@ -603,11 +908,6 @@ def main():
         "--cases",
         nargs="*",
         default=[
-            # "matpower/case14",
-            # "matpower/case30",
-            # "matpower/case57",
-            # "matpower/case89pegase",
-            # "matpower/case118",
             "matpower/case300",
         ],
         help="Case folders",
@@ -644,25 +944,25 @@ def main():
         "--taus",
         nargs="*",
         type=float,
-        default=[0.3, 0.5, 0.7],
+        default=[0.1, 0.2, 0.3, 0.5, 0.8],
         help="Tau sweep for WARM+PRUNE",
     )
     ap.add_argument(
         "--lazy-top-k",
         type=int,
         default=0,
-        help="Lazy: add top-K violated constraints per incumbent (0=all)",
+        help="Lazy: add top-K violated constraints (0=all)",
     )
     ap.add_argument(
         "--lazy-viol-tol",
         type=float,
-        default=1e-6,
+        default=10,
         help="Lazy: violation tolerance [MW]",
     )
     ap.add_argument(
         "--lazy-lodf-tol",
         type=float,
-        default=1e-4,
+        default=10,
         help="Lazy: |LODF| ignore threshold",
     )
     ap.add_argument(
@@ -678,14 +978,156 @@ def main():
         "--rc-restrict-train",
         action="store_true",
         default=True,
-        help="Redundancy index: restrict to TRAIN split only",
+        help="Redundancy index: restrict to TRAIN split",
     )
+
+    # Train resolving strategy
+    ap.add_argument(
+        "--train-use-existing-only",
+        action="store_true",
+        default=False,
+        help="Do NOT solve TRAIN stage; use existing outputs only.",
+    )
+    ap.add_argument(
+        "--train-resolve-missing",
+        action="store_true",
+        default=False,
+        help="Solve missing TRAIN outputs with RAW (overrides above).",
+    )
+
+    # ML accelerators (manual mode control; kept for backward compatibility)
+    ap.add_argument(
+        "--adv-commit-hints",
+        action="store_true",
+        default=False,
+        help="Apply commitment hints",
+    )
+    ap.add_argument(
+        "--adv-commit-mode",
+        choices=["hint", "start", "fix"],
+        default="hint",
+        help="Commit hints apply mode",
+    )
+    ap.add_argument(
+        "--adv-commit-thr",
+        type=float,
+        default=0.8,
+        help="Fixing threshold (if mode=fix)",
+    )
+    ap.add_argument(
+        "--adv-commit-on-raw",
+        action="store_true",
+        default=False,
+        help="Also apply commitment hints to RAW",
+    )
+    ap.add_argument(
+        "--adv-gnn-screen",
+        action="store_true",
+        default=False,
+        help="Use GNN screening for explicit models",
+    )
+    ap.add_argument(
+        "--adv-gnn-thr", type=float, default=0.60, help="GNN keep threshold"
+    )
+    ap.add_argument(
+        "--adv-gru-warm",
+        action="store_true",
+        default=False,
+        help="Apply GRU-based dispatch warm start",
+    )
+    ap.add_argument(
+        "--adv-adaptive-topk",
+        action="store_true",
+        default=False,
+        help="Lazy: use bandit for adaptive top-k",
+    )
+    ap.add_argument(
+        "--adv-topk-candidates",
+        nargs="*",
+        type=int,
+        default=[64, 128, 256],
+        help="Candidate K values for bandit",
+    )
+    ap.add_argument(
+        "--adv-topk-epsilon", type=float, default=0.1, help="Bandit epsilon"
+    )
+
+    # One-click autopilot
+    ap.add_argument(
+        "--run-experiments",
+        dest="run_experiments",
+        action="store_true",
+        help="Run a comprehensive set of ML combinations automatically",
+    )
+
+    # NEW: skip previously solved runs from existing log CSVs
+    ap.add_argument(
+        "--skip-solved",
+        action="store_true",
+        default=False,
+        help="Skip TEST runs for (instance,mode) pairs already present in results logs. "
+             "Use --skip-solved-logs to point at specific CSV(s). If omitted, scans results/raw_logs/*.csv.",
+    )
+    ap.add_argument(
+        "--skip-solved-logs",
+        nargs="*",
+        default=[],
+        help="Paths to existing results CSV logs to consider for skipping (default: scan results/raw_logs/*.csv).",
+    )
+    ap.add_argument(
+        "--skip-solved-require-ok",
+        action="store_true",
+        default=False,
+        help="Consider 'solved' only if verification reported violations == 'OK' (or feasible_ok == 'OK').",
+    )
+    ap.add_argument(
+        "--skip-solved-strict-status",
+        action="store_true",
+        default=False,
+        help="Consider 'solved' only if status == OPTIMAL (default: OPTIMAL/SUBOPTIMAL/TIME_LIMIT).",
+    )
+    ap.add_argument(
+        "--skip-solved-per-instance",
+        action="store_true",
+        default=False,
+        help="Skip all modes for an instance if any row for that instance matches the solved criteria in the logs.",
+    )
+
     args = ap.parse_args()
 
-    # Do we need redundancy at all?
-    prune_requested = any(
-        m.strip().upper().startswith("WARM+PRUNE") for m in args.modes
-    )
+    # Autopilot: choose cases automatically and enable all ML modules, solve missing TRAIN
+    auto_mode = bool(args.run_experiments)
+    if auto_mode:
+        auto_cases = _discover_cases_from_outputs()
+        if not auto_cases:
+            auto_cases = ["matpower/case300"]
+        args.cases = auto_cases
+        args.train_resolve_missing = True
+        args.skip_train_existing = True
+        args.adv_commit_hints = True
+        args.adv_gru_warm = True
+        args.adv_gnn_screen = True
+        args.adv_adaptive_topk = True
+        auto_modes = _auto_mode_list(args)
+
+    # Resolve TRAIN strategy selection
+    resolve_train = True
+    if args.train_use_existing_only and not args.train_resolve_missing:
+        resolve_train = False
+
+    # Prepare skip-solved registry (if requested)
+    skip_keys_mode: Set[Tuple[str, str]] = set()
+    skip_keys_inst: Set[str] = set()
+    if args.skip_solved:
+        log_paths = _collect_skip_logs(args.skip_solved_logs)
+        skip_keys_mode, skip_keys_inst = _load_skip_solved_keys(
+            log_paths,
+            require_ok=bool(args.skip_solved_require_ok),
+            strict_status=bool(args.skip_solved_strict_status),
+        )
+        tqdm.write(
+            f"[skip-solved] Loaded {len(skip_keys_mode)} (instance,mode) pairs and {len(skip_keys_inst)} instances from {len(log_paths)} log file(s)."
+        )
 
     for case_folder in args.cases:
         all_instances = _list_case_instances(case_folder)
@@ -703,8 +1145,8 @@ def main():
             f"[{case_folder}] total={len(all_instances)} | train={len(train)} val={len(val)} test={len(test)}"
         )
 
-        # Stage A: Solve TRAIN with RAW explicit N-1 if missing (to build warm/screening DB)
-        if train:
+        # Stage A: Solve TRAIN (RAW explicit) if needed
+        if train and resolve_train:
             tqdm.write(
                 f"[{case_folder}] Stage A: solving TRAIN missing outputs with RAW explicit ..."
             )
@@ -729,9 +1171,15 @@ def main():
                         lazy_isf_tol=args.lazy_isf_tol,
                         lazy_viol_tol=args.lazy_viol_tol,
                     )
-                    _ = solve_one(nm, cfg, wsp=None, rc=None, use_train_db_for_rc=True)
+                    _ = solve_one(
+                        nm, cfg, wsp=None, rc=None, use_train_db_for_rc=True, args=args
+                    )
+        else:
+            tqdm.write(
+                f"[{case_folder}] Stage A: skipping TRAIN solve (use-existing-only={args.train_use_existing_only})."
+            )
 
-        # Stage B: Pretrain warm-start index (lightweight)
+        # Stage B: Pretrain warm-start index
         wsp = WarmStartProvider(
             case_folder=case_folder,
             train_ratio=args.train_ratio,
@@ -742,7 +1190,104 @@ def main():
         trained, cov = wsp.ensure_trained(case_folder, allow_build_if_missing=False)
         tqdm.write(f"[{case_folder}] Warm index trained={trained}, coverage={cov:.3f}")
 
-        # Stage B2 (optional): Pretrain redundancy index ONLY if PRUNE requested
+        # Stage B2: Redundancy index if PRUNE present
+        mode_list_for_case: List[RunConfig] = []
+        if auto_mode:
+            mode_list_for_case = auto_modes
+            prune_requested = any(m.mode == "WARM+PRUNE" for m in mode_list_for_case)
+        else:
+            # Manual modes list
+            prune_requested = any(
+                m.strip().upper().startswith("WARM+PRUNE") for m in args.modes
+            )
+            for m in args.modes:
+                m_up = m.strip().upper()
+                if m_up == "RAW":
+                    mode_list_for_case.append(
+                        RunConfig(
+                            mode="RAW",
+                            time_limit=args.time_limit,
+                            mip_gap=args.mip_gap,
+                            use_gnn_screen=bool(args.adv_gnn_screen),
+                            gnn_thr=float(args.adv_gnn_thr),
+                            use_commit_hints=bool(args.adv_commit_hints)
+                            and bool(args.adv_commit_on_raw),
+                            commit_mode=str(args.adv_commit_mode),
+                            commit_thr=float(args.adv_commit_thr),
+                            commit_on_raw=bool(args.adv_commit_on_raw),
+                            save_human_logs=args.save_human_logs,
+                        )
+                    )
+                elif m_up == "WARM":
+                    mode_list_for_case.append(
+                        RunConfig(
+                            mode="WARM",
+                            time_limit=args.time_limit,
+                            mip_gap=args.mip_gap,
+                            use_gnn_screen=bool(args.adv_gnn_screen),
+                            gnn_thr=float(args.adv_gnn_thr),
+                            use_commit_hints=bool(args.adv_commit_hints),
+                            commit_mode=str(args.adv_commit_mode),
+                            commit_thr=float(args.adv_commit_thr),
+                            use_gru_warm=bool(args.adv_gru_warm),
+                            save_human_logs=args.save_human_logs,
+                        )
+                    )
+                elif m_up == "WARM+HINTS":
+                    mode_list_for_case.append(
+                        RunConfig(
+                            mode="WARM+HINTS",
+                            time_limit=args.time_limit,
+                            mip_gap=args.mip_gap,
+                            use_gnn_screen=bool(args.adv_gnn_screen),
+                            gnn_thr=float(args.adv_gnn_thr),
+                            use_commit_hints=bool(args.adv_commit_hints),
+                            commit_mode=str(args.adv_commit_mode),
+                            commit_thr=float(args.adv_commit_thr),
+                            use_gru_warm=bool(args.adv_gru_warm),
+                            save_human_logs=args.save_human_logs,
+                        )
+                    )
+                elif m_up == "WARM+LAZY":
+                    mode_list_for_case.append(
+                        RunConfig(
+                            mode="WARM+LAZY",
+                            time_limit=args.time_limit,
+                            mip_gap=args.mip_gap,
+                            lazy_top_k=args.lazy_top_k,
+                            lazy_lodf_tol=args.lazy_lodf_tol,
+                            lazy_isf_tol=args.lazy_isf_tol,
+                            lazy_viol_tol=args.lazy_viol_tol,
+                            use_adaptive_topk=bool(args.adv_adaptive_topk),
+                            topk_candidates=args.adv_topk_candidates,
+                            topk_epsilon=float(args.adv_topk_epsilon),
+                            use_commit_hints=bool(args.adv_commit_hints),
+                            commit_mode=str(args.adv_commit_mode),
+                            commit_thr=float(args.adv_commit_thr),
+                            use_gru_warm=bool(args.adv_gru_warm),
+                            save_human_logs=args.save_human_logs,
+                        )
+                    )
+                elif m_up == "WARM+PRUNE":
+                    for tau in args.taus:
+                        mode_list_for_case.append(
+                            RunConfig(
+                                mode="WARM+PRUNE",
+                                tau=float(tau),
+                                time_limit=args.time_limit,
+                                mip_gap=args.mip_gap,
+                                use_gnn_screen=bool(args.adv_gnn_screen),
+                                gnn_thr=float(args.adv_gnn_thr),
+                                use_commit_hints=bool(args.adv_commit_hints),
+                                commit_mode=str(args.adv_commit_mode),
+                                commit_thr=float(args.adv_commit_thr),
+                                use_gru_warm=bool(args.adv_gru_warm),
+                                save_human_logs=args.save_human_logs,
+                            )
+                        )
+                else:
+                    tqdm.write(f"Unknown mode '{m}' - ignored")
+
         rc = None
         if prune_requested:
             rc = RCProvider(
@@ -768,73 +1313,121 @@ def main():
             if not rc_ok:
                 rc = None
 
+        # Stage B3: Pretrain extra ML modules if needed
+        if auto_mode:
+            any_commit = any(
+                cfg.use_commit_hints or (cfg.mode == "RAW" and cfg.commit_on_raw)
+                for cfg in mode_list_for_case
+            )
+            any_gnn = any(cfg.use_gnn_screen for cfg in mode_list_for_case)
+            any_gru = any(cfg.use_gru_warm for cfg in mode_list_for_case)
+            if any_commit:
+                try:
+                    ch = CommitmentHints(case_folder=case_folder)
+                    ch.pretrain(force=True)
+                    _ = ch.ensure_trained()
+                    tqdm.write(f"[{case_folder}] Commitment hints model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] Commitment hints pretrain failed or skipped."
+                    )
+            if any_gnn:
+                try:
+                    gnn = GNNLineScreener(case_folder=case_folder)
+                    gnn.pretrain(force=True)
+                    _ = gnn.ensure_trained()
+                    tqdm.write(f"[{case_folder}] GNN screening model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] GNN screening pretrain failed or skipped."
+                    )
+            if any_gru:
+                try:
+                    gw = GRUDispatchWarmStart(case_folder=case_folder)
+                    gw.pretrain(force=True)
+                    _ = gw.ensure_trained()
+                    tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                    )
+        else:
+            # Manual flags drive pretraining (backward-compatible)
+            if bool(args.adv_commit_hints) or bool(args.adv_commit_on_raw):
+                try:
+                    ch = CommitmentHints(case_folder=case_folder)
+                    ch.pretrain(force=True)
+                    _ = ch.ensure_trained()
+                    tqdm.write(f"[{case_folder}] Commitment hints model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] Commitment hints pretrain failed or skipped."
+                    )
+            if bool(args.adv_gnn_screen):
+                try:
+                    gnn = GNNLineScreener(case_folder=case_folder)
+                    gnn.pretrain(force=True)
+                    _ = gnn.ensure_trained()
+                    tqdm.write(f"[{case_folder}] GNN screening model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] GNN screening pretrain failed or skipped."
+                    )
+            if bool(args.adv_gru_warm):
+                try:
+                    gw = GRUDispatchWarmStart(case_folder=case_folder)
+                    gw.pretrain(force=True)
+                    _ = gw.ensure_trained()
+                    tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
+                except Exception:
+                    tqdm.write(
+                        f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                    )
+
         # Stage C: Run TEST across modes
         log_path = _prepare_csv_log(case_folder)
         tqdm.write(f"[{case_folder}] logging to {log_path}")
 
-        mode_list: List[RunConfig] = []
-        for m in args.modes:
-            m = m.strip().upper()
-            if m == "RAW":
-                mode_list.append(
-                    RunConfig(
-                        mode="RAW",
-                        time_limit=args.time_limit,
-                        mip_gap=args.mip_gap,
-                        save_human_logs=args.save_human_logs,
-                    )
-                )
-            elif m == "WARM":
-                mode_list.append(
-                    RunConfig(
-                        mode="WARM",
-                        time_limit=args.time_limit,
-                        mip_gap=args.mip_gap,
-                        save_human_logs=args.save_human_logs,
-                    )
-                )
-            elif m == "WARM+HINTS":
-                mode_list.append(
-                    RunConfig(
-                        mode="WARM+HINTS",
-                        time_limit=args.time_limit,
-                        mip_gap=args.mip_gap,
-                        save_human_logs=args.save_human_logs,
-                    )
-                )
-            elif m == "WARM+LAZY":
-                mode_list.append(
-                    RunConfig(
-                        mode="WARM+LAZY",
-                        time_limit=args.time_limit,
-                        mip_gap=args.mip_gap,
-                        lazy_top_k=args.lazy_top_k,
-                        lazy_lodf_tol=args.lazy_lodf_tol,
-                        lazy_isf_tol=args.lazy_isf_tol,
-                        lazy_viol_tol=args.lazy_viol_tol,
-                        save_human_logs=args.save_human_logs,
-                    )
-                )
-            elif m == "WARM+PRUNE":
-                for tau in args.taus:
-                    mode_list.append(
-                        RunConfig(
-                            mode="WARM+PRUNE",
-                            tau=float(tau),
-                            time_limit=args.time_limit,
-                            mip_gap=args.mip_gap,
-                            save_human_logs=args.save_human_logs,
-                        )
-                    )
-            else:
-                tqdm.write(f"Unknown mode '{m}' - ignored")
-
         for nm in tqdm(test, desc=f"{case_folder} TEST", unit="inst"):
-            for cfg in mode_list:
-                row = solve_one(nm, cfg, wsp=wsp, rc=rc, use_train_db_for_rc=True)
+            for cfg in mode_list_for_case:
+                # Compute label now to evaluate skip logic
+                mode_label = _build_mode_label(cfg.mode, cfg)
+                if args.skip_solved:
+                    # Skip by instance or by (instance,mode)
+                    if args.skip_solved_per_instance:
+                        if nm in skip_keys_inst:
+                            tqdm.write(
+                                f"  {nm} | {mode_label:>18} | SKIPPED (instance present in skip logs)"
+                            )
+                            continue
+                    if (nm, mode_label) in skip_keys_mode:
+                        tqdm.write(
+                            f"  {nm} | {mode_label:>18} | SKIPPED (pair present in skip logs)"
+                        )
+                        continue
+
+                # Ensure solver tolerances for lazy match CLI defaults if not set
+                if (
+                    cfg.mode == "WARM+LAZY"
+                    and cfg.lazy_lodf_tol == 1e-4
+                    and cfg.lazy_isf_tol == 1e-8
+                ):
+                    cfg.lazy_lodf_tol = args.lazy_lodf_tol
+                    cfg.lazy_isf_tol = args.lazy_isf_tol
+                    cfg.lazy_viol_tol = args.lazy_viol_tol
+                row = solve_one(
+                    nm, cfg, wsp=wsp, rc=rc, use_train_db_for_rc=True, args=args
+                )
                 _append_csv(log_path, row)
                 tqdm.write(
-                    f"  {nm} | {row['mode']:>12} | status={row['status']:<12} time={row['runtime_sec']}s nodes={row['nodes']}"
+                    f"  {nm} | {row['mode']:>18} | status={row['status']:<12} time={row['runtime_sec']}s nodes={row['nodes']}"
+                )
+                logger.info(
+                    "Done %s | %-18s | status=%s time=%ss",
+                    nm,
+                    row["mode"],
+                    row["status"],
+                    row["runtime_sec"],
                 )
 
         tqdm.write(f"[{case_folder}] done. Log: {log_path}")

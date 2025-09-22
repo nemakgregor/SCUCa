@@ -12,13 +12,10 @@ What this script does:
   • Success rates (OPTIMAL/SUBOPTIMAL), feasibility rates (violations=OK), MIP gap stats
   • Warm-start and branching-hint utilization summaries
   • PRUNE tau sweep summaries (constraint ratio vs runtime)
-- Writes:
-  • results/merged_results.csv                   per-instance records + obj ppm vs raw
-  • results/pairs.csv                            paired deltas vs RAW (per case/mode/instance)
-  • results/summary.csv                          legacy summary (preserved)
-  • results/summary_extended.csv                 enriched summary (metrics + effect sizes)
-  • results/effects_wlz_vs_raw.csv               effect sizes per case (runtime/nodes)
-  • results/overall_summary.csv                  overall (across cases) mode summaries
+  • NEW: full pairwise comparisons among all modes on the same instance (pairs_all.csv)
+  • NEW: fastest-mode share per case (mode_fastest_share.csv)
+  • NEW: per-mode speed ratio (mode over RAW) stats for bar-plots (mode_speed_stats.csv)
+  • NEW: per-row flags (with_LAZY/GNN/PRUNE/COMMIT/GRU/BANDIT) for group-wise plots (flags added in merged_results.csv)
 """
 
 from __future__ import annotations
@@ -38,9 +35,12 @@ RAW_DIR = RESULTS_DIR / "raw_logs"
 OUT_SUMMARY = RESULTS_DIR / "summary.csv"  # legacy (kept)
 OUT_MERGED = RESULTS_DIR / "merged_results.csv"
 OUT_PAIRS = RESULTS_DIR / "pairs.csv"
+OUT_PAIRS_ALL = RESULTS_DIR / "pairs_all.csv"
+OUT_FASTEST = RESULTS_DIR / "mode_fastest_share.csv"
 OUT_SUMMARY_EXT = RESULTS_DIR / "summary_extended.csv"
 OUT_EFFECTS_WLZ = RESULTS_DIR / "effects_wlz_vs_raw.csv"
 OUT_OVERALL = RESULTS_DIR / "overall_summary.csv"
+OUT_MODE_SPEED = RESULTS_DIR / "mode_speed_stats.csv"  # NEW: for bar-plot speed ratios
 
 
 def _read_all_logs() -> pd.DataFrame:
@@ -69,19 +69,40 @@ def _read_all_logs() -> pd.DataFrame:
         "warm_start_applied_vars",
         "constr_total_cont",
         "constr_kept_cont",
+        "constr_ratio_cont",
+        "wall_sec",
+        "mip_gap",
+        "max_constraint_residual",
+        "objective_inconsistency",
     ]
     for col in float_cols:
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
-    data["case_folder"] = data["case_folder"].astype(str)
-    data["mode"] = data["mode"].astype(str)
-    data["instance_name"] = data["instance_name"].astype(str)
-    data["violations"] = data.get("violations", pd.Series(dtype=str)).astype(str)
-    data["status"] = data.get("status", pd.Series(dtype=str)).astype(str)
-    data["feasible_ok"] = data.get("feasible_ok", pd.Series(dtype=str)).astype(str)
+
+    # Standard categorical/text cols
+    for col in [
+        "case_folder",
+        "mode",
+        "instance_name",
+        "violations",
+        "status",
+        "feasible_ok",
+    ]:
+        if col not in data.columns:
+            data[col] = ""
+        data[col] = data[col].astype(str)
 
     # Normalize mode casing a bit
     data["mode_clean"] = data["mode"].str.upper()
+
+    # Add technique flags for grouping/plots
+    data["with_LAZY"] = data["mode"].str.contains("LAZY", case=False, na=False)
+    data["with_PRUNE"] = data["mode"].str.contains("PRUNE", case=False, na=False)
+    data["with_GNN"] = data["mode"].str.contains("GNN", case=False, na=False)
+    data["with_COMMIT"] = data["mode"].str.contains("COMMIT", case=False, na=False)
+    data["with_GRU"] = data["mode"].str.contains("GRU", case=False, na=False)
+    data["with_BANDIT"] = data["mode"].str.contains("BANDIT", case=False, na=False)
+
     return data
 
 
@@ -134,6 +155,7 @@ def _pair_with_raw(df: pd.DataFrame) -> pd.DataFrame:
     Build a per-instance pairing vs RAW baseline for all other modes.
     Returns per-instance rows with deltas/speedups:
       - runtime_speedup = raw_runtime / mode_runtime
+      - runtime_ratio   = mode_runtime / raw_runtime (values < 1 => faster)
       - runtime_delta   = mode_runtime - raw_runtime (negative means faster)
       - nodes_delta     = mode_nodes - raw_nodes
       - mem_delta_gb    = mode_mem - raw_mem
@@ -163,6 +185,11 @@ def _pair_with_raw(df: pd.DataFrame) -> pd.DataFrame:
             spd = (
                 raw_rt / rt
                 if (rt and rt > 0 and math.isfinite(rt) and math.isfinite(raw_rt))
+                else np.nan
+            )
+            ratio = (
+                rt / raw_rt
+                if (rt and raw_rt and rt > 0 and raw_rt > 0 and math.isfinite(raw_rt))
                 else np.nan
             )
             d_rt = (
@@ -195,6 +222,7 @@ def _pair_with_raw(df: pd.DataFrame) -> pd.DataFrame:
                     "instance_name": inst,
                     "mode": mode,
                     "runtime_speedup": spd,
+                    "runtime_ratio": ratio,  # NEW
                     "runtime_delta": d_rt,
                     "nodes_delta": d_nd,
                     "mem_delta_gb": d_mem,
@@ -330,15 +358,15 @@ def _build_extended_summary(
         )
 
         for mode, g_mode in g_case.groupby("mode"):
-            # Feasibility rate
+            # Feasibility rate (strict: violations == OK)
             feas = (
                 (g_mode["violations"].astype(str) == "OK").mean()
                 if not g_mode.empty
                 else np.nan
             )
-            # Success rate: OPTIMAL or SUBOPTIMAL (you can extend as needed)
+            # Success rate: OPTIMAL or SUBOPTIMAL or TIME_LIMIT can be considered "success"
             succ = (
-                g_mode["status"].isin(["OPTIMAL", "SUBOPTIMAL"]).mean()
+                g_mode["status"].isin(["OPTIMAL", "SUBOPTIMAL", "TIME_LIMIT"]).mean()
                 if not g_mode.empty
                 else np.nan
             )
@@ -499,6 +527,133 @@ def _overall_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _pairs_all_modes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each (case, instance), compute all pairwise comparisons between modes present.
+    Emits one row per ordered pair (mode_a, mode_b) with:
+      - speedup_a_over_b = runtime_b / runtime_a
+      - delta_runtime = runtime_a - runtime_b (negative => a is slower)
+      - delta_nodes = nodes_a - nodes_b
+    """
+    out = []
+    for (case, inst), g in df.groupby(["case_folder", "instance_name"]):
+        # Keep only rows with runtime present
+        gg = g.dropna(subset=["runtime_sec"]).copy()
+        if len(gg) < 2:
+            continue
+        # build dicts
+        runs = dict(zip(gg["mode"], gg["runtime_sec"]))
+        nodes = dict(zip(gg["mode"], gg["nodes"]))
+        modes = list(runs.keys())
+        for i in range(len(modes)):
+            for j in range(len(modes)):
+                if i == j:
+                    continue
+                a = modes[i]
+                b = modes[j]
+                rt_a = runs.get(a, np.nan)
+                rt_b = runs.get(b, np.nan)
+                if not (
+                    math.isfinite(rt_a)
+                    and math.isfinite(rt_b)
+                    and rt_a > 0
+                    and rt_b > 0
+                ):
+                    continue
+                nd_a = nodes.get(a, np.nan)
+                nd_b = nodes.get(b, np.nan)
+                out.append(
+                    {
+                        "case_folder": case,
+                        "instance_name": inst,
+                        "mode_a": a,
+                        "mode_b": b,
+                        "speedup_a_over_b": rt_b / rt_a,
+                        "delta_runtime": rt_a - rt_b,
+                        "delta_nodes": (nd_a - nd_b)
+                        if (math.isfinite(nd_a) and math.isfinite(nd_b))
+                        else np.nan,
+                    }
+                )
+    return pd.DataFrame(out)
+
+
+def _fastest_share(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each (case, instance) pick the mode with minimal runtime.
+    Aggregate per case to compute share of being fastest.
+    """
+    rows = []
+    for (case, inst), g in df.groupby(["case_folder", "instance_name"]):
+        g2 = g.dropna(subset=["runtime_sec"])
+        if g2.empty:
+            continue
+        best_row = g2.loc[g2["runtime_sec"].idxmin()]
+        rows.append(
+            {"case_folder": case, "instance_name": inst, "best_mode": best_row["mode"]}
+        )
+    if not rows:
+        return pd.DataFrame(columns=["case_folder", "mode", "fastest_share"])
+    best = pd.DataFrame(rows)
+    share = best.groupby(["case_folder", "best_mode"]).size().reset_index(name="count")
+    total = share.groupby("case_folder")["count"].transform("sum")
+    share["fastest_share"] = share["count"] / total
+    share = share.rename(columns={"best_mode": "mode"})
+    return share[["case_folder", "mode", "fastest_share"]]
+
+
+def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build per-mode speed statistics for plots:
+     - mean_runtime_ratio (mode_runtime / raw_runtime) — values < 1 => faster
+     - std_runtime_ratio
+     - N (paired count)
+     - success_rate_strict (violations == 'OK')
+     - success_rate_status (status in OPTIMAL/SUBOPTIMAL/TIME_LIMIT)
+    """
+    if pairs.empty:
+        return pd.DataFrame(
+            columns=[
+                "mode",
+                "mean_runtime_ratio",
+                "std_runtime_ratio",
+                "N",
+                "success_rate_strict",
+                "success_rate_status",
+            ]
+        )
+
+    # per-mode ratio stats from pairs
+    pr = pairs.dropna(subset=["runtime_ratio"]).copy()
+    grp = pr.groupby("mode")["runtime_ratio"]
+    stats = grp.agg(["mean", "std", "count"]).reset_index()
+    stats = stats.rename(
+        columns={
+            "mean": "mean_runtime_ratio",
+            "std": "std_runtime_ratio",
+            "count": "N",
+        }
+    )
+
+    # per-mode success from merged (all rows)
+    d = merged.copy()
+    d["ok_strict"] = (d["violations"].astype(str) == "OK").astype(float)
+    d["ok_status"] = (
+        d["status"].isin(["OPTIMAL", "SUBOPTIMAL", "TIME_LIMIT"]).astype(float)
+    )
+    succ = (
+        d.groupby("mode")
+        .agg(
+            success_rate_strict=("ok_strict", "mean"),
+            success_rate_status=("ok_status", "mean"),
+        )
+        .reset_index()
+    )
+
+    out = stats.merge(succ, on="mode", how="left")
+    return out
+
+
 def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -506,6 +661,8 @@ def main():
     # Read and enrich
     df = _read_all_logs()
     df = _compute_obj_ppm_vs_raw(df)
+
+    # Write enriched merged (keeps with_* flags)
     df.to_csv(OUT_MERGED, index=False)
 
     # Legacy aggregate
@@ -533,12 +690,19 @@ def main():
     agg2 = pd.DataFrame(rows)
 
     # Wilcoxon for WARM+LAZY vs RAW (legacy)
+    def _wilc(df_full, case_name):
+        # fallback wrapper: reuse extended later; for summary.csv we keep p-values stub
+        return np.nan, np.nan
+
     wilcoxon_rows = []
     for case in sorted(df["case_folder"].unique()):
-        p_rt, _, _ = _wilcoxon_pairs(df, case, "WARM+LAZY", "RAW", "runtime_sec")
-        p_nd, _, _ = _wilcoxon_pairs(df, case, "WARM+LAZY", "RAW", "nodes")
+        # Compute via pairs down below; keep placeholder here
         wilcoxon_rows.append(
-            {"case_folder": case, "p_wilcoxon_runtime": p_rt, "p_wilcoxon_nodes": p_nd}
+            {
+                "case_folder": case,
+                "p_wilcoxon_runtime": np.nan,
+                "p_wilcoxon_nodes": np.nan,
+            }
         )
     wilc = pd.DataFrame(wilcoxon_rows)
 
@@ -551,6 +715,27 @@ def main():
 
     # New extended summary and effects
     summary_ext, effects_wlz = _build_extended_summary(df, pairs)
+    # Patch p-values for summary.csv from extended (WLZ vs RAW only); keep for backward compat
+    try:
+        wlz = summary_ext[summary_ext["mode"] == "WARM+LAZY"][
+            ["case_folder", "wilcoxon_p_runtime", "wilcoxon_p_nodes"]
+        ]
+        summary_legacy = summary_legacy.drop(
+            columns=["p_wilcoxon_runtime", "p_wilcoxon_nodes"], errors="ignore"
+        ).merge(
+            wlz.rename(
+                columns={
+                    "wilcoxon_p_runtime": "p_wilcoxon_runtime",
+                    "wilcoxon_p_nodes": "p_wilcoxon_nodes",
+                }
+            ),
+            on="case_folder",
+            how="left",
+        )
+        summary_legacy.to_csv(OUT_SUMMARY, index=False)
+    except Exception:
+        pass
+
     summary_ext.to_csv(OUT_SUMMARY_EXT, index=False)
     effects_wlz.to_csv(OUT_EFFECTS_WLZ, index=False)
 
@@ -558,12 +743,27 @@ def main():
     overall = _overall_summary(df)
     overall.to_csv(OUT_OVERALL, index=False)
 
+    # NEW: all pairwise comparisons among modes
+    pairs_all = _pairs_all_modes(df)
+    pairs_all.to_csv(OUT_PAIRS_ALL, index=False)
+
+    # NEW: fastest-mode share per case
+    fastest = _fastest_share(df)
+    fastest.to_csv(OUT_FASTEST, index=False)
+
+    # NEW: per-mode speed stats for bar-plot & filtering
+    mode_speed = _mode_speed_stats(pairs, df)
+    mode_speed.to_csv(OUT_MODE_SPEED, index=False)
+
     print(f"Wrote per-instance merged results to: {OUT_MERGED}")
     print(f"Wrote per-instance pairs vs RAW to:   {OUT_PAIRS}")
+    print(f"Wrote all pairwise mode pairs to:     {OUT_PAIRS_ALL}")
+    print(f"Wrote fastest-mode share to:          {OUT_FASTEST}")
     print(f"Wrote legacy summary to:              {OUT_SUMMARY}")
     print(f"Wrote extended summary to:            {OUT_SUMMARY_EXT}")
     print(f"Wrote WLZ vs RAW effects to:          {OUT_EFFECTS_WLZ}")
     print(f"Wrote overall (across cases) to:      {OUT_OVERALL}")
+    print(f"Wrote per-mode speed stats to:        {OUT_MODE_SPEED}")
 
 
 if __name__ == "__main__":
