@@ -573,7 +573,6 @@ class RedundancyProvider:
         scenario,
         instance_name: str,
         *,
-        thr_abs: float = 20.0,  # deprecated (ignored)
         thr_rel: float = 0.10,
         use_train_index_only: bool = True,
         exclude_self: bool = True,
