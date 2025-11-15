@@ -6,6 +6,10 @@ __pycache__/
 data/*
 src/data/*
 src/data/intermediate/*
+outputs/*
+results/*
+src/stability_radius/outputs/*
+src/paper/
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
@@ -22,3 +26,8 @@ openapi/
 
 *.json
 *.csvlist.md
+
+list.md
+res.md
+run.txt
+*.tex
