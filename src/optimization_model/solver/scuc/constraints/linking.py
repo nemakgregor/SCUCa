@@ -9,6 +9,8 @@ import logging
 import gurobipy as gp
 from typing import Sequence
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,3 +36,4 @@ def add_constraints(
                 )
                 n += 1
     logger.info("Cons(C-102): segment capacity linking added=%d", n)
+    record_constraint_stat(model, "C-102_segment_cap", n)

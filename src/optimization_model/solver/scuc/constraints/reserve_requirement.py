@@ -8,6 +8,8 @@ import logging
 from typing import Sequence
 import gurobipy as gp
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,3 +34,4 @@ def add_constraints(
             )
             n += 1
     logger.info("Cons(C-105): reserve requirement added=%d", n)
+    record_constraint_stat(model, "C-105_reserve_requirement", n)

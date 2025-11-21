@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import gurobipy as gp
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Set
 
 from src.data_preparation.data_structure import UnitCommitmentScenario
 from src.optimization_model.solver.scuc.data.load import compute_total_load
@@ -19,6 +19,10 @@ from src.optimization_model.solver.scuc import (
     vars as scuc_vars,
     constraints as scuc_cons,
     objectives as scuc_obj,
+)
+from src.optimization_model.solver.scuc.constraints.log_utils import (
+    get_constraint_stats,
+    format_constraint_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,58 +32,23 @@ def build_model(
     scenario: UnitCommitmentScenario,
     *,
     contingency_filter: Optional[Callable] = None,
+    contingency_keep_masks: Optional[Dict] = None,
     use_lazy_contingencies: bool = False,
+    name_constraints: bool = True,
+    env: Optional[gp.Env] = None,
+    radius_line_whitelist: Optional[Set[str]] = None,
 ) -> gp.Model:
-    """Build a segmented SCUC model with commitment, startup/shutdown, reserves, and line constraints.
-
-    Parameters
-    ----------
-    scenario : UnitCommitmentScenario
-    contingency_filter : Optional[Callable]
-        Optional predicate(kind, line_l, out_obj, t, coeff, F_em) -> bool.
-        If provided and returns False, the corresponding +/- constraints are pruned.
-        Ignored when use_lazy_contingencies=True.
-    use_lazy_contingencies : bool
-        If True, do NOT add explicit contingency constraints here; instead, the caller
-        must attach the lazy-contingency callback to add them on the fly.
-        Contingency overflow slacks are still created and used in the objective.
-    """
-    model = gp.Model("SCUC_Segmented")
+    """Build a segmented SCUC model with commitment, startup/shutdown, reserves, and line constraints."""
+    model = (
+        gp.Model("SCUC_Segmented", env=env)
+        if env is not None
+        else gp.Model("SCUC_Segmented")
+    )
 
     units = scenario.thermal_units
     time_periods = range(scenario.time)
 
-    # Data preparation
     total_load = compute_total_load(scenario.buses, scenario.time)
-
-    # Scenario summary
-    logger.info(
-        "SCUC build: units=%d, buses=%d, lines=%d, reserves=%d, contingencies=%d, T=%d, dt(min)=%d",
-        len(scenario.thermal_units),
-        len(scenario.buses),
-        len(scenario.lines),
-        len(scenario.reserves),
-        len(scenario.contingencies),
-        scenario.time,
-        scenario.time_step,
-    )
-    if scenario.lines:
-        try:
-            isf = scenario.isf
-            lodf = scenario.lodf
-            ref_bus = getattr(scenario, "ptdf_ref_bus_index", scenario.buses[0].index)
-            logger.info(
-                "PTDF/ISF shape=%s, nnz=%d; LODF shape=%s, nnz=%d; ref_bus_index(1-based)=%s",
-                getattr(isf, "shape", None),
-                getattr(isf, "nnz", None),
-                getattr(lodf, "shape", None),
-                getattr(lodf, "nnz", None),
-                ref_bus,
-            )
-        except Exception:
-            pass
-
-    # Variables
 
     gen_commit = scuc_vars.commitment.add_variables(model, units, time_periods)
     gen_segment_power = scuc_vars.segment_power.add_variables(
@@ -104,7 +73,6 @@ def build_model(
             model, scenario.lines, time_periods
         )
 
-    # Shared contingency overflow slacks (per line/time)
     cont_over_pos = None
     cont_over_neg = None
     if scenario.lines and scenario.contingencies:
@@ -116,17 +84,13 @@ def build_model(
             model, scenario.lines, time_periods
         )
 
-    # Constraints
     scuc_cons.commitment_fixing.add_constraints(model, units, gen_commit, time_periods)
-
     scuc_cons.linking.add_constraints(
         model, units, gen_commit, gen_segment_power, time_periods
     )
-
     scuc_cons.power_balance_segmented.add_constraints(
         model, total_load, units, gen_commit, gen_segment_power, time_periods
     )
-
     scuc_cons.initial_conditions.add_constraints(
         model,
         units,
@@ -136,7 +100,6 @@ def build_model(
         gen_shutdown,
         time_periods,
     )
-
     scuc_cons.min_up_down.add_constraints(
         model, units, gen_commit, gen_startup, gen_shutdown, time_periods
     )
@@ -150,7 +113,6 @@ def build_model(
             reserve,
             time_periods,
         )
-
         scuc_cons.reserve_requirement.add_constraints(
             model, scenario.reserves, reserve, reserve_shortfall, time_periods
         )
@@ -159,12 +121,10 @@ def build_model(
         scuc_cons.line_flow_ptdf.add_constraints(
             model, scenario, gen_commit, gen_segment_power, line_flow, time_periods
         )
-
         scuc_cons.line_limits.add_constraints(
             model, scenario.lines, line_flow, line_over_pos, line_over_neg, time_periods
         )
 
-        # Line and generator contingency limits with shared slacks
         if scenario.contingencies and not use_lazy_contingencies:
             scuc_cons.contingencies.add_constraints(
                 model,
@@ -175,10 +135,14 @@ def build_model(
                 time_periods,
                 cont_over_pos,
                 cont_over_neg,
-                filter_predicate=contingency_filter,
+                keep_masks=contingency_keep_masks,
+                filter_predicate=(
+                    None if contingency_keep_masks else contingency_filter
+                ),
+                name_constraints=bool(name_constraints),
+                monitored_line_whitelist=radius_line_whitelist,
             )
 
-    # Objective with reserve penalty and line overflow penalty (base case and contingencies)
     scuc_obj.power_cost_segmented.set_objective(
         model,
         units,
@@ -189,7 +153,10 @@ def build_model(
         scenario.lines,
     )
 
-    # Expose key data for downstream tooling (solution dump, verification)
+    stats = get_constraint_stats(model)
+    if stats:
+        logger.info("Cons(summary): %s", format_constraint_stats(stats))
+
     model.__dict__["_total_load"] = total_load
     model.__dict__["_scenario_name"] = scenario.name or "scenario"
 

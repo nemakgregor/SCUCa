@@ -14,6 +14,8 @@ import logging
 import gurobipy as gp
 from scipy.sparse import csr_matrix
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,3 +70,4 @@ def add_constraints(
         getattr(isf, "nnz", None),
         ref_1b,
     )
+    record_constraint_stat(model, "C-108_flow_def", n)

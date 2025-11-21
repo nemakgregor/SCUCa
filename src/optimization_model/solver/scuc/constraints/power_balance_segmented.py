@@ -9,6 +9,8 @@ import logging
 import gurobipy as gp
 from typing import Sequence
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,10 +25,7 @@ def add_constraints(
     for t in time_periods:
         production_t = gp.LinExpr()
         for gen in generators:
-            # Minimum output when committed
             production_t += commit[gen.name, t] * float(gen.min_power[t])
-
-            # Incremental segments
             n_segments = len(gen.segments) if gen.segments else 0
             if n_segments > 0:
                 production_t += gp.quicksum(
@@ -37,3 +36,4 @@ def add_constraints(
             production_t == float(total_load[t]), name=f"power_balance[{t}]"
         )
     logger.info("Cons(C-103): power balance equalities added=%d", len(time_periods))
+    record_constraint_stat(model, "C-103_power_balance", len(time_periods))

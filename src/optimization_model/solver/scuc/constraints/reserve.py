@@ -11,6 +11,8 @@ import logging
 from typing import Sequence
 import gurobipy as gp
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,3 +62,4 @@ def add_constraints(
             )
             n += 1
     logger.info("Cons(C-104): reserve headroom linking added=%d", n)
+    record_constraint_stat(model, "C-104_reserve_headroom", n)

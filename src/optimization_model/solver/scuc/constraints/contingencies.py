@@ -1,36 +1,9 @@
-"""ID: C-120/C-121 — Contingency constraints with slacks.
-
-We enforce for every time t:
-
-Line outage (C-120):
-  For each contingency c that lists one or more outaged lines m, for every monitored
-  line l != m:
-      f_l,t + LODF[l,m] * f_m,t <= F_emergency[l,t] + cont_ov_pos[l,t]
-     -f_l,t - LODF[l,m] * f_m,t <= F_emergency[l,t] + cont_ov_neg[l,t]
-
-Generator outage (C-121):
-  For each contingency c that lists one or more outaged generators g at bus b(g), for
-  every monitored line l:
-      f_l,t - ISF[l,b(g)] * p_g,t <= F_emergency[l,t] + cont_ov_pos[l,t]
-     -f_l,t + ISF[l,b(g)] * p_g,t <= F_emergency[l,t] + cont_ov_neg[l,t]
-
-Notes
-- LODF matrix has shape (n_lines, n_lines).
-- ISF (PTDF) matrix has shape (n_lines, n_buses-1) for all non-reference buses.
-- Slack bus convention: the loss of p_g at bus b(g) is balanced by the reference bus.
-  If b(g) equals the reference bus, ISF column is absent (treated as zero).
-- Slacks are shared per (line,time) across all contingencies.
-
-New:
-- Optional filter_predicate(kind, line_l, out_obj, t, coeff, F_em) -> bool.
-  If provided and returns False, the corresponding +/- constraints are not added.
-  This enables ML-based redundancy pruning.
-"""
-
 import logging
 import gurobipy as gp
 from scipy.sparse import csc_matrix
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Tuple, Set, Iterable
+
+from .log_utils import record_constraint_stat
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +13,6 @@ _ISF_TOL = 1e-8
 
 
 def _total_power_expr(gen, t: int, commit, seg_power) -> gp.LinExpr:
-    """
-    Build a linear expression for total power of generator gen at time t:
-      p[gen,t] = u[gen,t] * min_power[gen,t] + sum_s pseg[gen,t,s]
-    """
     expr = commit[gen.name, t] * float(gen.min_power[t])
     n_segments = len(gen.segments) if gen.segments else 0
     if n_segments > 0:
@@ -60,8 +29,25 @@ def add_constraints(
     time_periods: range,
     cont_over_pos,
     cont_over_neg,
+    keep_masks: Optional[Dict[str, Set[Tuple[str, str]]]] = None,
     filter_predicate: Optional[Callable] = None,
+    name_constraints: bool = True,
+    monitored_line_whitelist: Optional[Set[str]] = None,
 ) -> None:
+    """
+    Add explicit post-contingency constraints (C-120/C-121) using batched addConstrs.
+
+    Pruning:
+      - monitored_line_whitelist: if provided, only these monitored lines (L) are considered.
+      - keep_masks: fast pair-level masks of (L|M) and (L|G).
+      - filter_predicate: per-time predicate(kind, L, out_obj, t, coeff, F_em) -> bool.
+
+    Instrumentation recorded on model:
+      - _explicit_total_cont_constraints
+      - _explicit_added_line_by_line: line_name -> inequalities
+      - _explicit_pair_line_counts: "L|M" -> inequalities
+      - _explicit_pair_gen_counts:  "L|G" -> inequalities
+    """
     contingencies = scenario.contingencies or []
     lines = scenario.lines or []
     if not contingencies or not lines or line_flow is None:
@@ -70,14 +56,89 @@ def add_constraints(
     lodf_csc: csc_matrix = scenario.lodf.tocsc()  # (n_lines, n_lines)
     isf_csc: csc_matrix = scenario.isf.tocsc()  # (n_lines, n_buses-1)
 
-    # Bus index mapping: non-reference columns in ascending 1-based bus index
     buses = scenario.buses
     ref_1b = getattr(scenario, "ptdf_ref_bus_index", buses[0].index)
     non_ref_bus_indices = sorted([b.index for b in buses if b.index != ref_1b])
     col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
 
-    # Line row index to line object (index in data is 1-based)
     line_by_row = {ln.index - 1: ln for ln in lines}
+
+    keep_line_pairs = set()
+    keep_gen_pairs = set()
+    if keep_masks:
+        keep_line_pairs = set(keep_masks.get("line", set()))
+        keep_gen_pairs = set(keep_masks.get("gen", set()))
+
+    def _mon_allowed(line_nm: str) -> bool:
+        if monitored_line_whitelist is None:
+            return True
+        return line_nm in monitored_line_whitelist
+
+    T_list = list(time_periods)
+
+    explicit_total = int(getattr(model, "_explicit_total_cont_constraints", 0))
+    by_line = getattr(model, "_explicit_added_line_by_line", None)
+    if by_line is None:
+        by_line = {}
+        try:
+            model._explicit_added_line_by_line = by_line
+        except Exception:
+            pass
+    pair_line = getattr(model, "_explicit_pair_line_counts", None)
+    if pair_line is None:
+        pair_line = {}
+        try:
+            model._explicit_pair_line_counts = pair_line
+        except Exception:
+            pass
+    pair_gen = getattr(model, "_explicit_pair_gen_counts", None)
+    if pair_gen is None:
+        pair_gen = {}
+        try:
+            model._explicit_pair_gen_counts = pair_gen
+        except Exception:
+            pass
+
+    def _incr_line(line_name: str, k: int = 1):
+        if not line_name:
+            return
+        by_line[line_name] = by_line.get(line_name, 0) + int(k)
+
+    def _incr_pair_line(lname: str, oname: str, k: int = 1):
+        key = f"{lname}|{oname}"
+        pair_line[key] = pair_line.get(key, 0) + int(k)
+
+    def _incr_pair_gen(lname: str, gname: str, k: int = 1):
+        key = f"{lname}|{gname}"
+        pair_gen[key] = pair_gen.get(key, 0) + int(k)
+
+    def _kept_ts_line(line_l, out_line, coeff: float) -> Iterable[int]:
+        if filter_predicate is None:
+            return T_list
+        kept = []
+        for t in T_list:
+            F_em = float(line_l.emergency_limit[t])
+            try:
+                keep = bool(filter_predicate("line", line_l, out_line, t, coeff, F_em))
+            except Exception:
+                keep = True
+            if keep:
+                kept.append(t)
+        return kept
+
+    def _kept_ts_gen(line_l, gen, coeff: float) -> Iterable[int]:
+        if filter_predicate is None:
+            return T_list
+        kept = []
+        for t in T_list:
+            F_em = float(line_l.emergency_limit[t])
+            try:
+                keep = bool(filter_predicate("gen", line_l, gen, t, coeff, F_em))
+            except Exception:
+                keep = True
+            if keep:
+                kept.append(t)
+        return kept
 
     n_cons_line = 0
     n_cons_gen = 0
@@ -85,9 +146,13 @@ def add_constraints(
     n_conts_used_gen = 0
     n_skipped_line = 0
     n_skipped_gen = 0
+    n_skipped_gen_zero = 0
+
+    allowed_lines_count = (
+        len(monitored_line_whitelist) if monitored_line_whitelist else len(lines)
+    )
 
     for cont in contingencies:
-        # Line-outage constraints (C-120)
         if cont.lines:
             n_conts_used_line += 1
             for out_line in cont.lines:
@@ -97,139 +162,142 @@ def add_constraints(
                 col_vals = col.data.tolist()
 
                 for l_row, alpha_lm in zip(col_rows, col_vals):
-                    # Skip the outaged line itself; skip tiny coefficients
-                    if l_row == mcol:
+                    if l_row == mcol or abs(alpha_lm) < _LODF_TOL:
                         continue
-                    if abs(alpha_lm) < _LODF_TOL:
-                        continue
-
                     line_l = line_by_row.get(l_row)
                     if line_l is None:
                         continue
+                    if not _mon_allowed(line_l.name):
+                        n_skipped_line += 2 * len(T_list)
+                        continue
+                    if (
+                        keep_line_pairs
+                        and (line_l.name, out_line.name) not in keep_line_pairs
+                    ):
+                        n_skipped_line += 2 * len(T_list)
+                        continue
 
-                    for t in time_periods:
-                        F_em = float(line_l.emergency_limit[t])
-                        coeff = float(alpha_lm)
+                    coeff = float(alpha_lm)
+                    kept_ts = list(_kept_ts_line(line_l, out_line, coeff))
+                    if not kept_ts:
+                        continue
 
-                        # ML-based pruning hook
-                        if filter_predicate is not None:
-                            try:
-                                keep = bool(
-                                    filter_predicate(
-                                        "line", line_l, out_line, t, coeff, F_em
-                                    )
-                                )
-                            except Exception:
-                                keep = True
-                            if not keep:
-                                n_skipped_line += 2  # +/- pair
-                                continue
-
-                        # + direction
-                        model.addConstr(
+                    model.addConstrs(
+                        (
                             line_flow[line_l.name, t]
                             + coeff * line_flow[out_line.name, t]
-                            <= F_em + cont_over_pos[line_l.name, t],
-                            name=f"cont_line_pos[{cont.name},{line_l.name},{out_line.name},{t}]",
+                            <= float(line_l.emergency_limit[t])
+                            + cont_over_pos[line_l.name, t]
+                            for t in kept_ts
                         )
-                        # - direction
-                        model.addConstr(
+                    )
+                    model.addConstrs(
+                        (
                             -line_flow[line_l.name, t]
                             - coeff * line_flow[out_line.name, t]
-                            <= F_em + cont_over_neg[line_l.name, t],
-                            name=f"cont_line_neg[{cont.name},{line_l.name},{out_line.name},{t}]",
+                            <= float(line_l.emergency_limit[t])
+                            + cont_over_neg[line_l.name, t]
+                            for t in kept_ts
                         )
-                        n_cons_line += 2
+                    )
+                    added = 2 * len(kept_ts)
+                    _incr_line(line_l.name, added)
+                    _incr_pair_line(line_l.name, out_line.name, added)
+                    explicit_total += added
+                    n_cons_line += added
 
-        # Generator-outage constraints (C-121)
         if getattr(cont, "units", None):
             n_conts_used_gen += 1
             for gen in cont.units:
                 bus_1b = gen.bus.index
-                # If the outaged generator is at the reference bus, ISF effect is zero
                 if bus_1b == ref_1b or bus_1b not in col_by_bus_1b:
-                    col = None
-                else:
-                    col = isf_csc.getcol(col_by_bus_1b[bus_1b])
-                if col is None:
-                    # ISF column absent => coefficient 0 for all lines (constraints reduce to +/- f_l <= F_em + slack)
-                    # We still add them unless filtered (coeff=0).
-                    for line_l in lines:
-                        for t in time_periods:
-                            F_em = float(line_l.emergency_limit[t])
-                            coeff = 0.0
-                            if filter_predicate is not None:
-                                try:
-                                    keep = bool(
-                                        filter_predicate(
-                                            "gen", line_l, gen, t, coeff, F_em
-                                        )
-                                    )
-                                except Exception:
-                                    keep = True
-                                if not keep:
-                                    n_skipped_gen += 2
-                                    continue
-                            model.addConstr(
-                                line_flow[line_l.name, t]
-                                <= F_em + cont_over_pos[line_l.name, t],
-                                name=f"cont_gen_pos[{cont.name},{line_l.name},{gen.name},{t}]",
-                            )
-                            model.addConstr(
-                                -line_flow[line_l.name, t]
-                                <= F_em + cont_over_neg[line_l.name, t],
-                                name=f"cont_gen_neg[{cont.name},{line_l.name},{gen.name},{t}]",
-                            )
-                            n_cons_gen += 2
-                else:
-                    col_rows = col.indices.tolist()
-                    col_vals = col.data.tolist()
+                    n_skipped_gen_zero += 2 * allowed_lines_count * len(T_list)
+                    continue
 
-                    for l_row, isf_lb in zip(col_rows, col_vals):
-                        if abs(isf_lb) < _ISF_TOL:
-                            continue
-                        line_l = line_by_row.get(l_row)
-                        if line_l is None:
-                            continue
+                col = isf_csc.getcol(col_by_bus_1b[bus_1b])
+                col_rows = col.indices.tolist()
+                col_vals = col.data.tolist()
+                isf_map = {r: v for r, v in zip(col_rows, col_vals)}
 
-                        for t in time_periods:
-                            F_em = float(line_l.emergency_limit[t])
-                            coeff = float(isf_lb)
-                            if filter_predicate is not None:
-                                try:
-                                    keep = bool(
-                                        filter_predicate(
-                                            "gen", line_l, gen, t, coeff, F_em
-                                        )
+                for l_row, isf_lb in zip(col_rows, col_vals):
+                    if abs(isf_lb) < _ISF_TOL:
+                        continue
+                    line_l = line_by_row.get(l_row)
+                    if line_l is None:
+                        continue
+                    if not _mon_allowed(line_l.name):
+                        n_skipped_gen += 2 * len(T_list)
+                        continue
+
+                    if keep_gen_pairs and (line_l.name, gen.name) not in keep_gen_pairs:
+                        n_skipped_gen += 2 * len(T_list)
+                        continue
+
+                    coeff = float(isf_map.get(line_l.index - 1, 0.0))
+                    if abs(coeff) < _ISF_TOL:
+                        continue
+                    kept_ts = list(_kept_ts_gen(line_l, gen, coeff))
+                    if not kept_ts:
+                        continue
+
+                    model.addConstrs(
+                        (
+                            line_flow[line_l.name, t]
+                            - coeff
+                            * (
+                                commit[gen.name, t] * float(gen.min_power[t])
+                                + gp.quicksum(
+                                    seg_power[gen.name, t, s]
+                                    for s in range(
+                                        len(gen.segments) if gen.segments else 0
                                     )
-                                except Exception:
-                                    keep = True
-                                if not keep:
-                                    n_skipped_gen += 2
-                                    continue
-                            p_expr = _total_power_expr(gen, t, commit, seg_power)
-                            # + direction: f_l - ISF * p_g <= F_em + slack
-                            model.addConstr(
-                                line_flow[line_l.name, t] - coeff * p_expr
-                                <= F_em + cont_over_pos[line_l.name, t],
-                                name=f"cont_gen_pos[{cont.name},{line_l.name},{gen.name},{t}]",
+                                )
                             )
-                            # - direction: -(f_l - ISF * p_g) <= F_em + slack
-                            model.addConstr(
-                                -line_flow[line_l.name, t] + coeff * p_expr
-                                <= F_em + cont_over_neg[line_l.name, t],
-                                name=f"cont_gen_neg[{cont.name},{line_l.name},{gen.name},{t}]",
+                            <= float(line_l.emergency_limit[t])
+                            + cont_over_pos[line_l.name, t]
+                            for t in kept_ts
+                        )
+                    )
+                    model.addConstrs(
+                        (
+                            -line_flow[line_l.name, t]
+                            + coeff
+                            * (
+                                commit[gen.name, t] * float(gen.min_power[t])
+                                + gp.quicksum(
+                                    seg_power[gen.name, t, s]
+                                    for s in range(
+                                        len(gen.segments) if gen.segments else 0
+                                    )
+                                )
                             )
-                            n_cons_gen += 2
+                            <= float(line_l.emergency_limit[t])
+                            + cont_over_neg[line_l.name, t]
+                            for t in kept_ts
+                        )
+                    )
+                    added = 2 * len(kept_ts)
+                    _incr_pair_gen(line_l.name, gen.name, added)
+                    explicit_total += added
+                    n_cons_gen += added
+
+    try:
+        model._explicit_total_cont_constraints = explicit_total
+    except Exception:
+        pass
 
     logger.info(
-        "Cons(C-120/C-121): line-out=%d (conts_used=%d, skipped=%d), gen-out=%d (conts_used=%d, skipped=%d); lines=%d, T=%d",
+        "Cons(C-120/C-121): line-out=%d (conts_used=%d, skipped=%d), gen-out=%d (conts_used=%d, skipped=%d, skipped_gen_zero=%d); lines=%d, T=%d",
         n_cons_line,
         n_conts_used_line,
         n_skipped_line,
         n_cons_gen,
         n_conts_used_gen,
         n_skipped_gen,
+        n_skipped_gen_zero,
         len(lines),
         len(time_periods),
     )
+    record_constraint_stat(model, "C-120_line_constraints", n_cons_line)
+    record_constraint_stat(model, "C-121_gen_constraints", n_cons_gen)
+    record_constraint_stat(model, "C-120_121_total", n_cons_line + n_cons_gen)

@@ -22,6 +22,8 @@ import logging
 from typing import Sequence
 import gurobipy as gp
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,7 +48,6 @@ def add_constraints(
     n_init_on = 0
     n_init_off = 0
 
-    # Sliding-window minimum up/down time constraints
     for g in generators:
         Lu = _int_or_zero(getattr(g, "min_up", 0))
         Ld = _int_or_zero(getattr(g, "min_down", 0))
@@ -75,7 +76,6 @@ def add_constraints(
                     )
                     n_min_down += 1
 
-    # Initial-condition enforcement across the left boundary of the horizon
     for g in generators:
         Lu = _int_or_zero(getattr(g, "min_up", 0))
         Ld = _int_or_zero(getattr(g, "min_down", 0))
@@ -83,7 +83,6 @@ def add_constraints(
         if s is None:
             continue
 
-        # If initially on for s>0 steps, enforce remaining up-time
         if s > 0 and Lu > 0:
             remaining_on = max(0, Lu - int(s))
             for t in range(min(remaining_on, T)):
@@ -92,7 +91,6 @@ def add_constraints(
                 )
                 n_init_on += 1
 
-        # If initially off for |s| steps, enforce remaining down-time
         if s < 0 and Ld > 0:
             s_off = -int(s)
             remaining_off = max(0, Ld - s_off)
@@ -109,5 +107,14 @@ def add_constraints(
         n_min_down,
         n_init_on,
         n_init_off,
+        n_min_up + n_min_down + n_init_on + n_init_off,
+    )
+    record_constraint_stat(model, "C-110_min_up", n_min_up)
+    record_constraint_stat(model, "C-111_min_down", n_min_down)
+    record_constraint_stat(model, "C-112_initial_on", n_init_on)
+    record_constraint_stat(model, "C-112_initial_off", n_init_off)
+    record_constraint_stat(
+        model,
+        "C-110_112_total",
         n_min_up + n_min_down + n_init_on + n_init_off,
     )
