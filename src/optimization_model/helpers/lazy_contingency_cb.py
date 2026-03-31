@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Set
+from typing import Optional, List, Tuple, Dict
 
 import threading  # for thread-safe stats/counters
 import gurobipy as gp
@@ -18,15 +18,6 @@ class LazyContingencyConfig:
 
     # Limit how many constraints we add per incumbent (0 => add all violated)
     add_top_k: int = 0
-
-    # Optional structural/ML masks: keep only these pairs
-    keep_line_pairs: Optional[Set[Tuple[str, str]]] = (
-        None  # {(line_l.name, out_line.name)}
-    )
-    keep_gen_pairs: Optional[Set[Tuple[str, str]]] = None  # {(line_l.name, gen.name)}
-
-    # Radius-based filter: only monitor these lines (drop all others)
-    allowed_monitored_lines: Optional[Set[str]] = None
 
     # Logging
     verbose: bool = True
@@ -93,24 +84,6 @@ def attach_lazy_contingency_callback(
         if nS > 0:
             expr += gp.quicksum(seg[gen.name, t, s] for s in range(nS))
         return expr
-
-    def _incr_line_added(line_name: str, k: int = 1) -> None:
-        if not line_name:
-            return
-        with _lock:
-            line_added_by_line[line_name] = line_added_by_line.get(line_name, 0) + int(
-                k
-            )
-
-    def _incr_pair_line(lname: str, oname: str, k: int = 1) -> None:
-        key = f"{lname}|{oname}"
-        with _lock:
-            lazy_pair_line[key] = lazy_pair_line.get(key, 0) + int(k)
-
-    def _incr_pair_gen(lname: str, gname: str, k: int = 1) -> None:
-        key = f"{lname}|{gname}"
-        with _lock:
-            lazy_pair_gen[key] = lazy_pair_gen.get(key, 0) + int(k)
 
     def _cb(m: gp.Model, where: int):
         if where != GRB.Callback.MIPSOL:
@@ -231,11 +204,6 @@ def attach_lazy_contingency_callback(
                     vals = col.data.tolist()
                     coeff_map = {r: v for r, v in zip(rows, vals)}
                     for line_l in lines:
-                        if not _mon_allowed(line_l.name):
-                            continue
-                        if keep_gen_pairs is not None:
-                            if (line_l.name, gen.name) not in keep_gen_pairs:
-                                continue
                         beta = float(coeff_map.get(line_l.index - 1, 0.0))
                         if abs(beta) < cfg.isf_tol:
                             continue
