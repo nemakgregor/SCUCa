@@ -24,10 +24,27 @@ def _grid_signature(scenario: UnitCommitmentScenario) -> tuple:
 def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     """
     Compute PTDF (ISF) and LODF matrices from network topology and line susceptances.
+
+    Conventions
+    -----------
     - Reference bus = smallest bus index.
-    - ISF shape: (n_lines, n_buses - 1) (non-reference buses columns; bus order ascending by index).
-    - LODF shape: (n_lines, n_lines).
-    Implementation uses sparse LU factorization (no explicit inverse).
+    - ISF shape: (n_lines, n_buses - 1)
+        Columns correspond to all *non-reference* buses, ordered by ascending bus index.
+      Entry ISF[l, b] is the flow contribution on line l from a +1 injection at bus b
+      and -1 at the reference bus.
+    - LODF shape: (n_lines, n_lines)
+        LODF[l, m] is the fraction of pre-contingency flow on line m that appears on
+        line l when line m is outaged (standard DC approximation).
+
+    Notes
+    -----
+    - We factor the reduced nodal susceptance matrix B_red once via sparse LU
+      factorization and reuse solves to obtain rows of B_red^{-1}.
+    - To improve numerical conditioning of downstream optimization models, we
+      aggressively sparsify the resulting ISF/LODF:
+          |value| < 1e-6  -->  0
+      (previous threshold was 1e-10). This removes extremely small coefficients
+      that contribute little physically but hurt the matrix range seen by Gurobi.
     """
     buses = scenario.buses
     lines = scenario.lines
@@ -51,6 +68,18 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     # Bus ordering and reference bus consistent with optimization model
     bus_indices_1b = sorted([int(b.index) for b in buses])
     pos_by_bus1b = {bidx: i0 for i0, bidx in enumerate(bus_indices_1b)}
+    sig = _grid_signature(scenario)
+    cached = _PTDF_LODF_CACHE.get(sig)
+    if cached is not None:
+        isf, lodf, ref_bus_1b = cached
+        scenario.isf = isf
+        scenario.lodf = lodf
+        scenario.__dict__["ptdf_ref_bus_index"] = ref_bus_1b
+        return
+
+    # Bus ordering and reference bus consistent with optimization model
+    bus_indices_1b = sorted([int(b.index) for b in buses])
+    pos_by_bus1b = {bidx: i0 for i0, bidx in enumerate(bus_indices_1b)}
     ref_bus_1b = bus_indices_1b[0]
     ref_pos = pos_by_bus1b[ref_bus_1b]
 
@@ -60,10 +89,34 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     data = []
     # Accumulate contributions
     diag_accum = [0.0] * n_buses
+    # Build sparse B (n_buses x n_buses)
+    rows = []
+    cols = []
+    data = []
+    # Accumulate contributions
+    diag_accum = [0.0] * n_buses
     for ln in lines:
         i0 = pos_by_bus1b[int(ln.source.index)]
         j0 = pos_by_bus1b[int(ln.target.index)]
+        i0 = pos_by_bus1b[int(ln.source.index)]
+        j0 = pos_by_bus1b[int(ln.target.index)]
         b = float(ln.susceptance)
+        diag_accum[i0] += b
+        diag_accum[j0] += b
+        # Off-diagonal -b
+        rows.extend([i0, j0])
+        cols.extend([j0, i0])
+        data.extend([-b, -b])
+    # Diagonal entries
+    for i in range(n_buses):
+        if diag_accum[i] != 0.0:
+            rows.append(i)
+            cols.append(i)
+            data.append(diag_accum[i])
+
+    B = coo_matrix((data, (rows, cols)), shape=(n_buses, n_buses)).tocsr()
+
+    # Reduced B (remove ref bus)
         diag_accum[i0] += b
         diag_accum[j0] += b
         # Off-diagonal -b
@@ -89,6 +142,7 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
 
         def solve(rhs):
             return lu.solve(rhs)
+
     except Exception:
         # Fallback: dense solve (small systems)
         B_red_dense = B_red.toarray()
@@ -118,27 +172,56 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
         return inv_rows_cache[col]
 
     # ISF rows
+    # Precompute inverse rows (via solves) lazily
+    inv_rows_cache: Dict[int, np.ndarray] = {}
+
+    def _inverse_row(i_pos: int) -> np.ndarray:
+        """
+        Return row i of B_red^{-1} (as a 1D array of length n_buses-1),
+        using symmetry (row == solve for e_i because B is SPD).
+        """
+        col = col_by_pos[i_pos]
+        if col in inv_rows_cache:
+            return inv_rows_cache[col]
+        e = np.zeros(len(non_ref_positions), dtype=float)
+        e[col] = 1.0
+        y = solve(e)
+        inv_rows_cache[col] = np.asarray(y).reshape(-1)
+        return inv_rows_cache[col]
+
+    # ISF rows
     isf = np.zeros((n_lines, n_buses - 1), dtype=float)
     for l_idx, ln in enumerate(lines):
+        i0 = pos_by_bus1b[int(ln.source.index)]
+        j0 = pos_by_bus1b[int(ln.target.index)]
         i0 = pos_by_bus1b[int(ln.source.index)]
         j0 = pos_by_bus1b[int(ln.target.index)]
         b_l = float(ln.susceptance)
 
         row_vec = np.zeros(n_buses - 1, dtype=float)
+
+        row_vec = np.zeros(n_buses - 1, dtype=float)
         if i0 != ref_pos:
+            row_vec += b_l * _inverse_row(i0)
             row_vec += b_l * _inverse_row(i0)
         if j0 != ref_pos:
             row_vec -= b_l * _inverse_row(j0)
         isf[l_idx, :] = row_vec
+            row_vec -= b_l * _inverse_row(j0)
+        isf[l_idx, :] = row_vec
 
+    # Expand ISF to full-bus columns for LODF computation
     # Expand ISF to full-bus columns for LODF computation
     isf_full = np.zeros((n_lines, n_buses), dtype=float)
     for c, pos in enumerate(non_ref_positions):
         isf_full[:, pos] = isf[:, c]
 
     # LODF via standard formula: PTDF_m(m,n) with reference bus fixed
+    # LODF via standard formula: PTDF_m(m,n) with reference bus fixed
     lodf = np.zeros((n_lines, n_lines), dtype=float)
     for c_idx, c_line in enumerate(lines):
+        mpos = pos_by_bus1b[int(c_line.source.index)]
+        npos = pos_by_bus1b[int(c_line.target.index)]
         mpos = pos_by_bus1b[int(c_line.source.index)]
         npos = pos_by_bus1b[int(c_line.target.index)]
         ptdf_c_mn = isf_full[c_idx, mpos] - isf_full[c_idx, npos]
@@ -151,8 +234,8 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
 
     np.fill_diagonal(lodf, -1.0)
 
-    # Drop tiny values for sparsity
-    tol = 1e-10
+    # Drop tiny values for sparsity and numerical conditioning
+    tol = 1e-6
     isf[np.abs(isf) < tol] = 0.0
     lodf[np.abs(lodf) < tol] = 0.0
 
@@ -160,6 +243,12 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     lodf_csr = csr_matrix(lodf)
     scenario.isf = isf_csr
     scenario.lodf = lodf_csr
+    isf_csr = csr_matrix(isf)
+    lodf_csr = csr_matrix(lodf)
+    scenario.isf = isf_csr
+    scenario.lodf = lodf_csr
     scenario.__dict__["ptdf_ref_bus_index"] = ref_bus_1b
+
+    _PTDF_LODF_CACHE[sig] = (isf_csr, lodf_csr, ref_bus_1b)
 
     _PTDF_LODF_CACHE[sig] = (isf_csr, lodf_csr, ref_bus_1b)

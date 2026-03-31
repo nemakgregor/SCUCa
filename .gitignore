@@ -10,6 +10,7 @@ outputs/*
 results/*
 src/stability_radius/outputs/*
 src/paper/
+src/scuc_sr/results/*
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
@@ -30,4 +31,5 @@ openapi/
 list.md
 res.md
 run.txt
+paper.tex
 *.tex

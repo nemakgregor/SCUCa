@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Set
+from typing import Optional, List, Tuple, Dict
 
-import threading  # NEW: for thread-safe stats/counters
+import threading  # for thread-safe stats/counters
 import gurobipy as gp
 from gurobipy import GRB
 from scipy.sparse import csc_matrix
@@ -12,21 +12,12 @@ from scipy.sparse import csc_matrix
 @dataclass
 class LazyContingencyConfig:
     # Numerical tolerances
-    lodf_tol: float = 1e-4
-    isf_tol: float = 1e-8
-    violation_tol: float = 1e-6  # add a constraint if viol > this
+    lodf_tol: float = 1e-2
+    isf_tol: float = 1e-3
+    violation_tol: float = 1e-3  # add a constraint if viol > this
 
     # Limit how many constraints we add per incumbent (0 => add all violated)
     add_top_k: int = 0
-
-    # Optional structural/ML masks: keep only these pairs
-    keep_line_pairs: Optional[Set[Tuple[str, str]]] = (
-        None  # {(line_l.name, out_line.name)}
-    )
-    keep_gen_pairs: Optional[Set[Tuple[str, str]]] = None  # {(line_l.name, gen.name)}
-
-    # Radius-based filter: only monitor these lines (drop all others)
-    allowed_monitored_lines: Optional[Set[str]] = None
 
     # Logging
     verbose: bool = True
@@ -84,7 +75,7 @@ def attach_lazy_contingency_callback(
     lazy_pair_line: Dict[str, int] = {}
     lazy_pair_gen: Dict[str, int] = {}
 
-    # NEW: lock for thread-safe stats/counters
+    # Lock for thread-safe stats/counters (Gurobi may run callbacks multi-threaded)
     _lock = threading.Lock()
 
     def _p_expr(gen, t: int) -> gp.LinExpr:
@@ -94,24 +85,6 @@ def attach_lazy_contingency_callback(
             expr += gp.quicksum(seg[gen.name, t, s] for s in range(nS))
         return expr
 
-    def _incr_line_added(line_name: str, k: int = 1) -> None:
-        if not line_name:
-            return
-        with _lock:
-            line_added_by_line[line_name] = line_added_by_line.get(line_name, 0) + int(
-                k
-            )
-
-    def _incr_pair_line(lname: str, oname: str, k: int = 1) -> None:
-        key = f"{lname}|{oname}"
-        with _lock:
-            lazy_pair_line[key] = lazy_pair_line.get(key, 0) + int(k)
-
-    def _incr_pair_gen(lname: str, gname: str, k: int = 1) -> None:
-        key = f"{lname}|{gname}"
-        with _lock:
-            lazy_pair_gen[key] = lazy_pair_gen.get(key, 0) + int(k)
-
     def _cb(m: gp.Model, where: int):
         if where != GRB.Callback.MIPSOL:
             return
@@ -119,6 +92,7 @@ def attach_lazy_contingency_callback(
         with _lock:
             stats["incumbents_seen"] += 1
 
+        # Current base-case line flows
         f_val: Dict[Tuple[str, int], float] = {}
         for ln in lines:
             for t in range(T):
@@ -127,6 +101,7 @@ def attach_lazy_contingency_callback(
                 except Exception:
                     f_val[(ln.name, t)] = 0.0
 
+        # Current generator outputs (total power)
         p_val: Dict[Tuple[str, int], float] = {}
         for gen in scenario.thermal_units:
             nS = len(gen.segments) if gen.segments else 0
@@ -148,7 +123,7 @@ def attach_lazy_contingency_callback(
 
         viols: List[Tuple[float, str, int, object, object, int, float]] = []
 
-        # Line-outages
+        # Line-outage contingencies
         for cont in scenario.contingencies or []:
             if not cont.lines:
                 continue
@@ -187,13 +162,14 @@ def attach_lazy_contingency_callback(
                                 (vneg, "line", -1, line_l, out_line, t, float(alpha))
                             )
 
-        # Gen-outages
+        # Gen-outage contingencies
         for cont in scenario.contingencies or []:
             if not getattr(cont, "units", None):
                 continue
             for gen in cont.units:
                 bidx = gen.bus.index
                 if bidx == ref_1b or bidx not in col_by_bus_1b:
+                    # Effectively coeff == 0 => post = base flow
                     if keep_gen_pairs is not None:
                         for line_l in lines:
                             if not _mon_allowed(line_l.name):
@@ -228,11 +204,6 @@ def attach_lazy_contingency_callback(
                     vals = col.data.tolist()
                     coeff_map = {r: v for r, v in zip(rows, vals)}
                     for line_l in lines:
-                        if not _mon_allowed(line_l.name):
-                            continue
-                        if keep_gen_pairs is not None:
-                            if (line_l.name, gen.name) not in keep_gen_pairs:
-                                continue
                         beta = float(coeff_map.get(line_l.index - 1, 0.0))
                         if abs(beta) < cfg.isf_tol:
                             continue
@@ -249,6 +220,7 @@ def attach_lazy_contingency_callback(
         if not viols:
             return
 
+        # Sort by descending violation
         viols.sort(key=lambda x: x[0], reverse=True)
 
         eff_top_k = int(cfg.add_top_k) if cfg.add_top_k and cfg.add_top_k > 0 else 0
@@ -328,8 +300,26 @@ def attach_lazy_contingency_callback(
     model._lazy_contingency_stats = stats
     model._lazy_contingency_callback = _cb
     model._lazy_contingency_attached = True
+    # For backward compatibility with any external code that might inspect these:
     model._callback = _cb
     model._has_callback = True
     model._lazy_added_line_by_line = line_added_by_line
     model._lazy_added_pair_line = lazy_pair_line
     model._lazy_added_pair_gen = lazy_pair_gen
+
+
+def optimize_with_lazy_callback(model: gp.Model) -> None:
+    """
+    Optimize *model* using the attached lazy-contingency callback if present.
+
+    If attach_lazy_contingency_callback() was called on this model, we call:
+        model.optimize(model._lazy_contingency_callback)
+    otherwise we fall back to:
+        model.optimize()
+    """
+    cb = getattr(model, "_lazy_contingency_callback", None)
+    has_cb = bool(getattr(model, "_lazy_contingency_attached", False))
+    if cb is not None and has_cb:
+        model.optimize(cb)
+    else:
+        model.optimize()

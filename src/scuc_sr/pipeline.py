@@ -34,9 +34,51 @@ from src.scuc_sr.solve_modes import (
     _compute_final_flows_and_generation,
 )
 from src.scuc_sr.utils import case_results_dir, case_tag
+from src.scuc_sr.matrix_stats import write_matrix_statistics
+from src.scuc_sr.tuning import run_tuning_for_instance
 
 VERIFY_TOL = 1e-6
 PRINT_LOCK = threading.Lock()
+
+# Fixed-width table layout for pipeline_*.log
+_TABLE_COLUMNS = [
+    ("run_id", 6, "right"),
+    ("instance", 30, "left"),
+    ("mode", 10, "left"),
+    ("status", 12, "left"),
+    ("status_code", 11, "right"),
+    ("runtime_sec", 12, "right"),
+    ("mip_gap", 10, "right"),
+    ("obj_val", 14, "right"),
+    ("num_vars", 10, "right"),
+    ("num_constrs", 12, "right"),
+    ("num_bin", 9, "right"),
+    ("num_int", 9, "right"),
+    ("n_n1_explicit", 15, "right"),
+    ("n_n1_lazy", 11, "right"),
+    ("violations", 11, "right"),
+    ("dropped_essential", 18, "right"),
+    ("verified", 9, "left"),
+]
+
+
+def _format_table_row(values: dict) -> str:
+    """
+    Format a dictionary of column -> string into a fixed-width table row.
+    All numeric-looking columns are right-justified, others left-justified.
+    Values longer than the configured width are hard-clipped so that
+    column boundaries remain fixed across all rows.
+    """
+    parts = []
+    for name, width, align in _TABLE_COLUMNS:
+        raw = str(values.get(name, ""))
+        if len(raw) > width:
+            raw = raw[:width]
+        if align == "right":
+            parts.append(raw.rjust(width))
+        else:
+            parts.append(raw.ljust(width))
+    return " | ".join(parts)
 
 
 def safe_print(*args, **kwargs):
@@ -208,32 +250,70 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", required=True)
     ap.add_argument(
-        "--run-split", choices=["train", "val", "test", "all"], default="val"
+        "--run-split", choices=["train", "val", "test", "all"], default="all"
     )
     ap.add_argument(
         "--modes",
         nargs="+",
-        default=["raw", "lazy", "prune_lazy", "sr_lazy"],
+        default=[
+            # "raw",
+            "lazy",
+            "prune_lazy",
+            "sr_lazy",
+        ],
         choices=["raw", "sr", "prune", "lazy", "prune_lazy", "sr_lazy"],
     )
     ap.add_argument("--limit-val", type=int, default=0)
-    ap.add_argument("--time-limit", type=int, default=300)
+    ap.add_argument("--time-limit", type=int, default=1200)
     ap.add_argument("--mip-gap", type=float, default=0.05)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--lodf-tol", type=float, default=1e-2)
     ap.add_argument("--isf-tol", type=float, default=1e-3)
     ap.add_argument("--viol-tol", type=float, default=1e-2)
-    ap.add_argument("--rc-thr-rel", type=float, default=0.40)
+    ap.add_argument("--rc-thr-rel", type=float, default=0.50)
     ap.add_argument("--rc-use-train-db", action="store_true", default=True)
-    ap.add_argument("--sigma-sr", type=float, default=0.3)
-    ap.add_argument("--sr-l2-thr", type=float, default=60.0)
-    ap.add_argument("--sr-sigma-thr", type=float, default=0.0)
+    ap.add_argument("--sigma-sr", type=float, default=0.2)
+    ap.add_argument("--sr-l2-thr", type=float, default=50.0)
+    ap.add_argument("--sr-sigma-thr", type=float, default=0.2)
     ap.add_argument("--lazy-top-k", type=int, default=0)
     ap.add_argument("--train-ratio", type=float, default=0.70)
     ap.add_argument("--val-ratio", type=float, default=0.15)
     ap.add_argument("--tee-logs", action="store_true", default=True)
     ap.add_argument("--overwrite-logs-results", action="store_true", default=True)
+
+    # New: tuning-mode options
+    ap.add_argument(
+        "--tune",
+        action="store_true",
+        default=False,
+        help="Run Gurobi parameter tuning on a single instance instead of solving all modes.",
+    )
+    ap.add_argument(
+        "--tune-instance",
+        type=str,
+        default="",
+        help="Instance name to tune (default: first instance from selected split).",
+    )
+    ap.add_argument(
+        "--tune-time",
+        type=int,
+        default=3600,
+        help="Total tuning time budget in seconds (TuneTimeLimit).",
+    )
+    ap.add_argument(
+        "--tune-trials",
+        type=int,
+        default=5,
+        help="Number of parameter sets to explore during tuning (TuneTrials).",
+    )
+    ap.add_argument(
+        "--tune-metric",
+        type=int,
+        choices=[-1, 0, 1],
+        default=-1,
+        help="Tuning metric: -1=runtime, 0=balanced, 1=gap.",
+    )
 
     args = ap.parse_args()
     case_folder = args.case.strip().strip("/\\").replace("\\", "/")
@@ -275,10 +355,37 @@ def main():
     case_tag_value = case_tag(case_folder)
     timestamp_label = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Results base tag and log file names depend on overwrite flag.
+    # If overwrite, we clear result dir; this is reused for tuning outputs too.
     if args.overwrite_logs_results:
         shutil.rmtree(case_dir, ignore_errors=True)
         case_dir.mkdir(parents=True, exist_ok=True)
+
+    # Tuning-only branch -------------------------------------------------- #
+    if args.tune:
+        # Choose instance to tune: explicit or first from selection
+        inst_name = args.tune_instance.strip() or to_run[0]
+        tune_out_dir = case_dir / "tuning"
+        tune_out_dir.mkdir(parents=True, exist_ok=True)
+        safe_print(
+            f"Tuning Gurobi parameters for {inst_name} "
+            f"(case={case_folder}, out={tune_out_dir})"
+        )
+        run_tuning_for_instance(
+            instance_name=inst_name,
+            case_folder=case_folder,
+            tune_time_limit=args.tune_time,
+            tune_trials=args.tune_trials,
+            tune_metric=args.tune_metric,
+            time_limit=args.time_limit,
+            mip_gap=args.mip_gap,
+            output_dir=tune_out_dir,
+            use_lazy_contingencies=False,
+        )
+        return
+    # -------------------------------------------------------------------- #
+
+    # Results base tag and log file names depend on overwrite flag.
+    if args.overwrite_logs_results:
         results_base = case_tag_value
         run_log_suffix = case_tag_value
         pipeline_log_name = f"pipeline_{case_tag_value}.log"
@@ -338,14 +445,20 @@ def main():
         csv.writer(f).writerow(csv_cols)
 
     # Configure a Gurobi environment.
-    # When tee-logs is disabled, we let Gurobi write its own LogFile.
-    # When tee-logs is enabled (default), we do NOT set LogFile to avoid
-    # duplicate solver logs (Gurobi -> file and Tee -> same file).
     env = gp.Env(empty=0)
     if not args.tee_logs:
         env.setParam("LogFile", str(gurobi_log))
     env.setParam("OutputFlag", 1)
+
+    # Essential parameters for numerical stability
     env.setParam("NumericFocus", 1)
+    env.setParam("ScaleFlag", 2)  # more aggressive internal scaling
+
+    # MIP performance parameters
+    env.setParam("MIPFocus", 1)  # Focus on finding good solutions
+
+    # Heuristics
+    env.setParam("Heuristics", 0.7)  # Aggressive heuristics for SCUC
 
     # Tee stdout/stderr to run_*.log if requested
     tee_fh = None
@@ -375,31 +488,13 @@ def main():
     hb = Heartbeat(10.0)
     safe_print(f"Running {len(to_run)} instances on modes: {args.modes}")
     run_counter = 0
+    first_matrix_stats_written = False
 
     # Column header for pipeline_*.log table (without leading timestamp).
-    table_header_cols = [
-        "run_id",
-        "instance",
-        "mode",
-        "status",
-        "status_code",
-        "runtime_sec",
-        "mip_gap",
-        "obj_val",
-        "num_vars",
-        "num_constrs",
-        "num_bin",
-        "num_int",
-        "n_n1_explicit",
-        "n_n1_lazy",
-        "violations",
-        "dropped_essential",
-        "verified",
-    ]
+    table_header_cols = [name for (name, _, _) in _TABLE_COLUMNS]
 
     for i, nm in enumerate(to_run, 1):
         safe_print(f"--- {i}/{len(to_run)}: {nm} ---")
-        # _log_event(evt_log, f"START {nm}")
         try:
             sc = read_benchmark(nm, quiet=True).deterministic
         except Exception as e:
@@ -412,11 +507,12 @@ def main():
             run_label = f"Run #{run_counter:04d}"
             hb.start(f"{run_label} {nm} [{mode}]")
             safe_print(f"\n\n{run_label} | {nm} | mode={mode}")
-            # _log_event(evt_log, f"{run_label} START {nm} mode={mode}")
+
             m, met, verified = None, None, False
             violations = 0
             ess_dropped = 0
             n_expl, n_lazy = 0, 0
+            verify_report_str = ""
 
             try:
                 if mode == "raw":
@@ -495,16 +591,11 @@ def main():
                     n_expl = rep.get("explicit_added", 0)
 
                 verified, checks, verify_report = verify_solution(sc, m)
+                verify_report_str = verify_report
                 violations = sum(1 for c in checks if c.value > VERIFY_TOL)
 
                 # Console verification report (always)
                 safe_print(f"{run_label} verification report:\n{verify_report}\n")
-
-                # If validation failed, also log the full report into pipeline_*.log
-                if not verified:
-                    _log_event(evt_log, f"{run_label} verification report:")
-                    for line in verify_report.splitlines():
-                        _log_event(evt_log, line)
 
                 if (not verified) and mode in ["sr", "prune"]:
                     ess_dropped = _identify_dropped_essential(
@@ -514,7 +605,6 @@ def main():
             except Exception as e:
                 safe_print(f"FAIL {mode}: {e}")
                 _log_event(evt_log, f"{run_label} {nm} mode={mode} EXCEPTION: {e}")
-                # Fill metrics with sentinel values so downstream logging still works
                 met = type(
                     "o",
                     (),
@@ -533,12 +623,31 @@ def main():
                 verified = False
                 violations = 0
                 ess_dropped = 0
+                verify_report_str = ""
             finally:
                 hb.stop()
 
+            # Matrix statistics: first successful run only
+            if (not first_matrix_stats_written) and m is not None:
+                try:
+                    stats_meta = {
+                        "instance_name": nm,
+                        "mode": mode,
+                        "status": getattr(met, "status", "UNKNOWN"),
+                    }
+                    stats_path = case_dir / f"matrix_stats_first_{results_base}.json"
+                    write_matrix_statistics(m, stats_path, meta=stats_meta)
+                    safe_print(
+                        f"[matrix_stats] Wrote coefficient statistics to {stats_path}"
+                    )
+                    first_matrix_stats_written = True
+                except Exception as e:
+                    safe_print(f"[matrix_stats] Failed to write stats: {e}")
+
             # Tabular line into pipeline_*.log; repeat header every 50 runs
             if run_counter % 50 == 1:
-                _log_table_row(evt_log, " | ".join(table_header_cols))
+                header_vals = {name: name for name in table_header_cols}
+                _log_table_row(evt_log, _format_table_row(header_vals))
 
             mip_gap_str = (
                 f"{met.mip_gap:.6f}"
@@ -550,26 +659,27 @@ def main():
                 if getattr(met, "obj_val", None) is not None
                 else ""
             )
-            row_values = [
-                str(run_counter),
-                nm,
-                mode,
-                getattr(met, "status", "UNKNOWN"),
-                str(getattr(met, "status_code", -1)),
-                f"{getattr(met, 'runtime', 0.0):.4f}",
-                mip_gap_str,
-                obj_str,
-                str(getattr(met, "num_vars", 0)),
-                str(getattr(met, "num_constrs", 0)),
-                str(getattr(met, "num_bin", 0)),
-                str(getattr(met, "num_int", 0)),
-                str(n_expl),
-                str(n_lazy),
-                str(violations),
-                str(ess_dropped),
-                "OK" if verified else "FAIL",
-            ]
-            _log_table_row(evt_log, " | ".join(row_values))
+
+            row_dict = {
+                "run_id": str(run_counter),
+                "instance": nm,
+                "mode": mode,
+                "status": getattr(met, "status", "UNKNOWN"),
+                "status_code": str(getattr(met, "status_code", -1)),
+                "runtime_sec": f"{getattr(met, 'runtime', 0.0):.4f}",
+                "mip_gap": mip_gap_str,
+                "obj_val": obj_str,
+                "num_vars": str(getattr(met, "num_vars", 0)),
+                "num_constrs": str(getattr(met, "num_constrs", 0)),
+                "num_bin": str(getattr(met, "num_bin", 0)),
+                "num_int": str(getattr(met, "num_int", 0)),
+                "n_n1_explicit": str(n_expl),
+                "n_n1_lazy": str(n_lazy),
+                "violations": str(violations),
+                "dropped_essential": str(ess_dropped),
+                "verified": "OK" if verified else "FAIL",
+            }
+            _log_table_row(evt_log, _format_table_row(row_dict))
 
             # Detailed CSV row
             with res_csv.open("a", newline="") as f:
@@ -595,6 +705,12 @@ def main():
                         1 if verified else 0,
                     ]
                 )
+
+            # If validation failed, also log the full report into pipeline_*.log,
+            if (not verified) and verify_report_str:
+                _log_event(evt_log, f"{run_label} verification report:")
+                for line in verify_report_str.splitlines():
+                    _log_event(evt_log, line)
 
     if tee_fh:
         tee_fh.close()
