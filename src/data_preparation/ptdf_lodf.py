@@ -24,10 +24,27 @@ def _grid_signature(scenario: UnitCommitmentScenario) -> tuple:
 def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
     """
     Compute PTDF (ISF) and LODF matrices from network topology and line susceptances.
+
+    Conventions
+    -----------
     - Reference bus = smallest bus index.
-    - ISF shape: (n_lines, n_buses - 1) (non-reference buses columns; bus order ascending by index).
-    - LODF shape: (n_lines, n_lines).
-    Implementation uses sparse LU factorization (no explicit inverse).
+    - ISF shape: (n_lines, n_buses - 1)
+        Columns correspond to all *non-reference* buses, ordered by ascending bus index.
+      Entry ISF[l, b] is the flow contribution on line l from a +1 injection at bus b
+      and -1 at the reference bus.
+    - LODF shape: (n_lines, n_lines)
+        LODF[l, m] is the fraction of pre-contingency flow on line m that appears on
+        line l when line m is outaged (standard DC approximation).
+
+    Notes
+    -----
+    - We factor the reduced nodal susceptance matrix B_red once via sparse LU
+      factorization and reuse solves to obtain rows of B_red^{-1}.
+    - To improve numerical conditioning of downstream optimization models, we
+      aggressively sparsify the resulting ISF/LODF:
+          |value| < 1e-6  -->  0
+      (previous threshold was 1e-10). This removes extremely small coefficients
+      that contribute little physically but hurt the matrix range seen by Gurobi.
     """
     buses = scenario.buses
     lines = scenario.lines
@@ -89,6 +106,7 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
 
         def solve(rhs):
             return lu.solve(rhs)
+
     except Exception:
         # Fallback: dense solve (small systems)
         B_red_dense = B_red.toarray()
@@ -151,8 +169,8 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
 
     np.fill_diagonal(lodf, -1.0)
 
-    # Drop tiny values for sparsity
-    tol = 1e-10
+    # Drop tiny values for sparsity and numerical conditioning
+    tol = 1e-6
     isf[np.abs(isf) < tol] = 0.0
     lodf[np.abs(lodf) < tol] = 0.0
 
