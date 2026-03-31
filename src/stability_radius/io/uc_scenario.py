@@ -84,25 +84,24 @@ def _sum_bus_profiled(bus: Bus, t: int) -> float:
 def _sum_bus_thermal(bus: Bus, t: int) -> float:
     """
     Baseline thermal generation:
-      - if initial_power present: use it (clamped to [min, max])
+      - if initial_power present: use it as-is (no clamping)
       - elif must_run[t] > 0: use min_power[t]
       - else: 0
+
+    Note: We keep non-negativity on the aggregate to avoid negative generation.
     """
     total = 0.0
     try:
         for tu in bus.thermal_units:
             minp = _val_at(getattr(tu, "min_power", None), t, 0.0)
-            maxp = _val_at(getattr(tu, "max_power", None), t, minp)
             must = _val_at(getattr(tu, "must_run", None), t, 0.0)
 
             p = 0.0
             ip = getattr(tu, "initial_power", None)
             if ip is not None:
+                # Respect raw initial power; do not clamp to [min, max]
                 p = float(ip)
-                if maxp >= minp:
-                    p = min(maxp, max(minp, p))
             else:
-                # If must-run at t, use min_power
                 if must and must > 0.5:
                     p = max(0.0, minp)
                 else:

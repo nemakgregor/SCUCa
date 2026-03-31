@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Set
 
+import threading  # NEW: for thread-safe stats/counters
 import gurobipy as gp
 from gurobipy import GRB
 from scipy.sparse import csc_matrix
@@ -18,6 +19,15 @@ class LazyContingencyConfig:
     # Limit how many constraints we add per incumbent (0 => add all violated)
     add_top_k: int = 0
 
+    # Optional structural/ML masks: keep only these pairs
+    keep_line_pairs: Optional[Set[Tuple[str, str]]] = (
+        None  # {(line_l.name, out_line.name)}
+    )
+    keep_gen_pairs: Optional[Set[Tuple[str, str]]] = None  # {(line_l.name, gen.name)}
+
+    # Radius-based filter: only monitor these lines (drop all others)
+    allowed_monitored_lines: Optional[Set[str]] = None
+
     # Logging
     verbose: bool = True
 
@@ -30,7 +40,6 @@ def attach_lazy_contingency_callback(
 ) -> None:
     """
     Register a Gurobi callback that enforces N-1 contingency constraints lazily.
-    With optional bandit for adaptive top-k control.
     """
     cfg = config or LazyContingencyConfig()
 
@@ -61,7 +70,22 @@ def attach_lazy_contingency_callback(
     col_by_bus_1b = {bus_1b: col for col, bus_1b in enumerate(non_ref_bus_indices)}
     line_by_row = {ln.index - 1: ln for ln in lines}
 
+    keep_line_pairs = cfg.keep_line_pairs or None
+    keep_gen_pairs = cfg.keep_gen_pairs or None
+    allowed_lines = cfg.allowed_monitored_lines or None
+
+    def _mon_allowed(lname: str) -> bool:
+        if allowed_lines is None:
+            return True
+        return lname in allowed_lines
+
     stats = {"incumbents_seen": 0, "lazy_added": 0}
+    line_added_by_line: Dict[str, int] = {}
+    lazy_pair_line: Dict[str, int] = {}
+    lazy_pair_gen: Dict[str, int] = {}
+
+    # NEW: lock for thread-safe stats/counters
+    _lock = threading.Lock()
 
     def _p_expr(gen, t: int) -> gp.LinExpr:
         expr = commit[gen.name, t] * float(gen.min_power[t])
@@ -70,11 +94,30 @@ def attach_lazy_contingency_callback(
             expr += gp.quicksum(seg[gen.name, t, s] for s in range(nS))
         return expr
 
+    def _incr_line_added(line_name: str, k: int = 1) -> None:
+        if not line_name:
+            return
+        with _lock:
+            line_added_by_line[line_name] = line_added_by_line.get(line_name, 0) + int(
+                k
+            )
+
+    def _incr_pair_line(lname: str, oname: str, k: int = 1) -> None:
+        key = f"{lname}|{oname}"
+        with _lock:
+            lazy_pair_line[key] = lazy_pair_line.get(key, 0) + int(k)
+
+    def _incr_pair_gen(lname: str, gname: str, k: int = 1) -> None:
+        key = f"{lname}|{gname}"
+        with _lock:
+            lazy_pair_gen[key] = lazy_pair_gen.get(key, 0) + int(k)
+
     def _cb(m: gp.Model, where: int):
         if where != GRB.Callback.MIPSOL:
             return
 
-        stats["incumbents_seen"] += 1
+        with _lock:
+            stats["incumbents_seen"] += 1
 
         f_val: Dict[Tuple[str, int], float] = {}
         for ln in lines:
@@ -122,6 +165,11 @@ def attach_lazy_contingency_callback(
                     line_l = line_by_row.get(l_row)
                     if line_l is None:
                         continue
+                    if not _mon_allowed(line_l.name):
+                        continue
+                    if keep_line_pairs is not None:
+                        if (line_l.name, out_line.name) not in keep_line_pairs:
+                            continue
                     for t in range(T):
                         post = (
                             f_val[(line_l.name, t)]
@@ -146,22 +194,45 @@ def attach_lazy_contingency_callback(
             for gen in cont.units:
                 bidx = gen.bus.index
                 if bidx == ref_1b or bidx not in col_by_bus_1b:
-                    for line_l in lines:
-                        for t in range(T):
-                            post = f_val[(line_l.name, t)]
-                            F_em = float(line_l.emergency_limit[t])
-                            vpos = post - F_em
-                            vneg = -post - F_em
-                            if vpos > cfg.violation_tol:
-                                viols.append((vpos, "gen", +1, line_l, gen, t, 0.0))
-                            if vneg > cfg.violation_tol:
-                                viols.append((vneg, "gen", -1, line_l, gen, t, 0.0))
+                    if keep_gen_pairs is not None:
+                        for line_l in lines:
+                            if not _mon_allowed(line_l.name):
+                                continue
+                            if (line_l.name, gen.name) not in keep_gen_pairs:
+                                continue
+                            for t in range(T):
+                                post = f_val[(line_l.name, t)]
+                                F_em = float(line_l.emergency_limit[t])
+                                vpos = post - F_em
+                                vneg = -post - F_em
+                                if vpos > cfg.violation_tol:
+                                    viols.append((vpos, "gen", +1, line_l, gen, t, 0.0))
+                                if vneg > cfg.violation_tol:
+                                    viols.append((vneg, "gen", -1, line_l, gen, t, 0.0))
+                    else:
+                        for line_l in lines:
+                            if not _mon_allowed(line_l.name):
+                                continue
+                            for t in range(T):
+                                post = f_val[(line_l.name, t)]
+                                F_em = float(line_l.emergency_limit[t])
+                                vpos = post - F_em
+                                vneg = -post - F_em
+                                if vpos > cfg.violation_tol:
+                                    viols.append((vpos, "gen", +1, line_l, gen, t, 0.0))
+                                if vneg > cfg.violation_tol:
+                                    viols.append((vneg, "gen", -1, line_l, gen, t, 0.0))
                 else:
                     col = isf_csc.getcol(col_by_bus_1b[bidx])
                     rows = col.indices.tolist()
                     vals = col.data.tolist()
                     coeff_map = {r: v for r, v in zip(rows, vals)}
                     for line_l in lines:
+                        if not _mon_allowed(line_l.name):
+                            continue
+                        if keep_gen_pairs is not None:
+                            if (line_l.name, gen.name) not in keep_gen_pairs:
+                                continue
                         beta = float(coeff_map.get(line_l.index - 1, 0.0))
                         if abs(beta) < cfg.isf_tol:
                             continue
@@ -178,10 +249,8 @@ def attach_lazy_contingency_callback(
         if not viols:
             return
 
-        # Rank violations by severity
         viols.sort(key=lambda x: x[0], reverse=True)
 
-        # Adaptive top-K via bandit policy (optional)
         eff_top_k = int(cfg.add_top_k) if cfg.add_top_k and cfg.add_top_k > 0 else 0
         if getattr(cfg, "topk_policy", None) is not None:
             try:
@@ -205,11 +274,15 @@ def attach_lazy_contingency_callback(
                         line_flow[line_l.name, t] + coeff * line_flow[out_obj.name, t]
                         <= float(line_l.emergency_limit[t]) + covp[line_l.name, t]
                     )
+                    _incr_line_added(line_l.name, 1)
+                    _incr_pair_line(line_l.name, out_obj.name, 1)
                 else:
                     m.cbLazy(
                         -line_flow[line_l.name, t] - coeff * line_flow[out_obj.name, t]
                         <= float(line_l.emergency_limit[t]) + covn[line_l.name, t]
                     )
+                    _incr_line_added(line_l.name, 1)
+                    _incr_pair_line(line_l.name, out_obj.name, 1)
             else:
                 pexpr = _p_expr(out_obj, t)
                 if sign > 0:
@@ -217,15 +290,18 @@ def attach_lazy_contingency_callback(
                         line_flow[line_l.name, t] - coeff * pexpr
                         <= float(line_l.emergency_limit[t]) + covp[line_l.name, t]
                     )
+                    _incr_pair_gen(line_l.name, out_obj.name, 1)
                 else:
                     m.cbLazy(
                         -line_flow[line_l.name, t] + coeff * pexpr
                         <= float(line_l.emergency_limit[t]) + covn[line_l.name, t]
                     )
+                    _incr_pair_gen(line_l.name, out_obj.name, 1)
             added += 1
 
-        stats["lazy_added"] += added
-        # Bandit update with heuristic reward (prefer lower additions)
+        with _lock:
+            stats["lazy_added"] += added
+
         if getattr(cfg, "topk_policy", None) is not None:
             try:
                 cfg.topk_policy.update(
@@ -254,3 +330,6 @@ def attach_lazy_contingency_callback(
     model._lazy_contingency_attached = True
     model._callback = _cb
     model._has_callback = True
+    model._lazy_added_line_by_line = line_added_by_line
+    model._lazy_added_pair_line = lazy_pair_line
+    model._lazy_added_pair_gen = lazy_pair_gen

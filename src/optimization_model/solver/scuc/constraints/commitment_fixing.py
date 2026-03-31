@@ -9,6 +9,8 @@ import logging
 import gurobipy as gp
 from typing import Sequence
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,3 +41,7 @@ def add_constraints(
         n_off,
         n_on + n_off,
     )
+    total = n_on + n_off
+    record_constraint_stat(model, "C-101_fix_on", n_on)
+    record_constraint_stat(model, "C-101_fix_off", n_off)
+    record_constraint_stat(model, "C-101_total", total)

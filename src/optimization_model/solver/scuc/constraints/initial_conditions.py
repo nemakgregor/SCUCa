@@ -21,6 +21,8 @@ import logging
 from typing import Sequence
 import gurobipy as gp
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,7 +68,6 @@ def add_constraints(
     n_excl = 0
     n_ramp = 0
 
-    # C-106: startup/shutdown definition + exclusivity
     for gen in generators:
         u0 = _initial_u(gen)
         for t in time_periods:
@@ -89,7 +90,6 @@ def add_constraints(
             )
             n_excl += 1
 
-    # C-107: ramping with startup/shutdown limits (includes t=0 with initial conditions)
     for gen in generators:
         ru = float(gen.ramp_up)
         rd = float(gen.ramp_down)
@@ -133,3 +133,7 @@ def add_constraints(
         n_ramp,
         n_def + n_excl + n_ramp,
     )
+    record_constraint_stat(model, "C-106_definition", n_def)
+    record_constraint_stat(model, "C-106_exclusive", n_excl)
+    record_constraint_stat(model, "C-107_ramping", n_ramp)
+    record_constraint_stat(model, "C-106_107_total", n_def + n_excl + n_ramp)

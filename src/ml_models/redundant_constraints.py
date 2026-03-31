@@ -183,6 +183,74 @@ class RedundancyProvider:
             "test": set(),
         }
 
+    def make_masks_for_instance(
+        self,
+        scenario,
+        instance_name: str,
+        *,
+        thr_rel: float = 0.10,
+        use_train_index_only: bool = True,
+        exclude_self: bool = True,
+    ) -> Optional[Tuple[Tuple[set, set], Dict]]:
+        """
+        Build pair-level keep masks for contingencies:
+          - keep_line_pairs = set{ (line_l.name, out_line.name) } to keep (line outages)
+          - keep_gen_pairs  = set{ (line_l.name, gen.name) }     to keep (gen outages)
+
+        A pair is KEPT if min_rel_margin < thr_rel (i.e., likely to bind).
+        Returns ((keep_line_pairs, keep_gen_pairs), stats) or None if no neighbor/index.
+        """
+        case_folder = _case_folder_from_instance(instance_name)
+        if not self._index:
+            self.ensure_trained(case_folder, allow_build_if_missing=False)
+        if not self._index:
+            return None
+
+        input_path = (DataParams._CACHE / (instance_name + ".json.gz")).resolve()
+        target_load = _load_input_system_load(input_path)
+        if not target_load:
+            return None
+        T = scenario.time
+        target_feats = _zscore(_ensure_list_length([float(x) for x in target_load], T, True, 0.0))
+
+        restrict = self._splits["train"] if use_train_index_only else None
+        exclude = {instance_name} if exclude_self else None
+        nn = self._nearest_neighbor(target_feats, restrict_to_names=restrict, exclude_names=exclude)
+        if nn is None:
+            return None
+        nn_name, _nn_item, nn_dist = nn
+
+        neighbor_json_path = (self.base_output / (nn_name + ".json")).resolve()
+        neighbor = _load_output_solution(neighbor_json_path)
+        if neighbor is None:
+            return None
+
+        line_pairs_minrel, gen_pairs_minrel = self._compute_minrel_from_neighbor(scenario, neighbor)
+
+        thr = float(thr_rel)
+        keep_line_pairs = set()
+        keep_gen_pairs = set()
+
+        for key, srel in line_pairs_minrel.items():
+            # key = (l_name, m_name)
+            if float(srel) < thr:
+                keep_line_pairs.add((str(key[0]), str(key[1])))
+
+        for key, srel in gen_pairs_minrel.items():
+            # key = (l_name, g_name)
+            if float(srel) < thr:
+                keep_gen_pairs.add((str(key[0]), str(key[1])))
+
+        stats = {
+            "neighbor": nn_name,
+            "distance": nn_dist,
+            "kept_line_pairs": len(keep_line_pairs),
+            "kept_gen_pairs": len(keep_gen_pairs),
+            "total_line_pairs_scanned": len(line_pairs_minrel),
+            "total_gen_pairs_scanned": len(gen_pairs_minrel),
+        }
+        return (keep_line_pairs, keep_gen_pairs), stats
+    
     def _list_inputs(self, case_folder: str) -> List[Path]:
         case_dir = (self.base_input / case_folder).resolve()
         if not case_dir.exists():

@@ -11,6 +11,8 @@ import logging
 from typing import Sequence
 import gurobipy as gp
 
+from .log_utils import record_constraint_stat
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,3 +43,4 @@ def add_constraints(
         len(lines),
         len(time_periods),
     )
+    record_constraint_stat(model, "C-109_flow_limits", n)
