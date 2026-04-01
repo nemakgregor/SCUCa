@@ -514,7 +514,7 @@ def _build_mode_label(base: str, cfg: RunConfig) -> str:
         parts.append("GNN")
     if cfg.use_commit_hints and not suppress_feature_suffix:
         parts.append("COMMIT")
-    if cfg.use_gru_warm and not suppress_feature_suffix:
+    if cfg.use_gru_warm and (not suppress_feature_suffix or base.startswith("STREDUCE")):
         parts.append("GRU")
     if base == "WARM+LAZY":
         if cfg.use_adaptive_topk:
@@ -546,6 +546,7 @@ def _finalize_result_row(
     active_set_report=None,
     rolling_report=None,
     st_profile=None,
+    st_gru_applied: bool = False,
 ) -> Dict:
     saved_solution_path = None
     saved_output_scope = ""
@@ -648,6 +649,21 @@ def _finalize_result_row(
     )
     lazy_stats = getattr(model, "_lazy_contingency_stats", {}) or {}
     lazy_added_cont = int(lazy_stats.get("lazy_added", 0) or 0)
+    method_exactness = "heuristic" if mode_cfg.mode == "SHRINK+LAZY" else "exact"
+    constr_ratio_explicit = constr_ratio
+    constr_realized_cont = None
+    constr_ratio_realized = None
+    try:
+        if constr_total is not None:
+            tot = int(constr_total)
+            if tot > 0:
+                kept_explicit = int(constr_kept or 0)
+                realized = int(kept_explicit + lazy_added_cont)
+                constr_realized_cont = realized
+                constr_ratio_realized = float(realized) / float(tot)
+    except Exception:
+        constr_realized_cont = None
+        constr_ratio_realized = None
 
     finished_at = time.time()
 
@@ -684,7 +700,19 @@ def _finalize_result_row(
         "branch_hints_applied": hints_applied,
         "constr_total_cont": "" if constr_total is None else int(constr_total),
         "constr_kept_cont": "" if constr_kept is None else int(constr_kept),
-        "constr_ratio_cont": "" if constr_ratio is None else f"{constr_ratio:.4f}",
+        # Backward-compatible alias: explicit screening ratio only.
+        "constr_ratio_cont": ""
+        if constr_ratio_explicit is None
+        else f"{constr_ratio_explicit:.4f}",
+        "constr_ratio_cont_explicit": ""
+        if constr_ratio_explicit is None
+        else f"{constr_ratio_explicit:.4f}",
+        "constr_realized_cont": ""
+        if constr_realized_cont is None
+        else int(constr_realized_cont),
+        "constr_ratio_cont_realized": ""
+        if constr_ratio_realized is None
+        else f"{constr_ratio_realized:.4f}",
         "screen_monitored_lines": ""
         if monitored_line_count is None
         else int(monitored_line_count),
@@ -719,6 +747,8 @@ def _finalize_result_row(
         "st_used_gnn_model": int(
             1 if bool(getattr(st_profile, "used_gnn_model", False)) else 0
         ),
+        "st_used_gru_model": int(1 if bool(st_gru_applied) else 0),
+        "method_exactness": method_exactness,
         "saved_output_scope": saved_output_scope,
         "solution_json_path": "" if saved_solution_path is None else str(saved_solution_path),
     }
@@ -785,6 +815,7 @@ def solve_one(
     active_set_report = None
     rolling_report = None
     st_profile = None
+    st_gru_applied = False
     sc_model = sc
 
     # Redundancy pruning predicate / keep masks (PRUNE family)
@@ -938,6 +969,7 @@ def solve_one(
             active_set_report=None,
             rolling_report=rolling_report,
             st_profile=None,
+            st_gru_applied=False,
         )
 
     # GNN screening — explicit models only
@@ -1097,8 +1129,12 @@ def solve_one(
                 gw = GRUDispatchWarmStart(case_folder=case_folder)
                 if gw.ensure_trained():
                     _ = gw.apply_to_model(model, sc_model)
+                    if st_mode or st_lazy_mode:
+                        st_gru_applied = True
             except Exception as e:
                 logger.warning("GRU warm-start failed for %s: %s", instance_name, e)
+    if (st_mode or st_lazy_mode) and st_gru_applied and ("+GRU" not in mode_label):
+        mode_label = f"{mode_label}+GRU"
 
     # Branching hints from Start values (for HINTS/LAZY/PRUNE modes)
     hints_applied = 0
@@ -1242,6 +1278,7 @@ def solve_one(
         active_set_report=active_set_report,
         rolling_report=rolling_report,
         st_profile=st_profile,
+        st_gru_applied=st_gru_applied,
     )
 
 
@@ -1280,6 +1317,9 @@ def _prepare_csv_log(case_folder: str) -> Path:
         "constr_total_cont",
         "constr_kept_cont",
         "constr_ratio_cont",
+        "constr_ratio_cont_explicit",
+        "constr_realized_cont",
+        "constr_ratio_cont_realized",
         "screen_monitored_lines",
         "explicit_added_cont",
         "lazy_added_cont",
@@ -1296,6 +1336,8 @@ def _prepare_csv_log(case_folder: str) -> Path:
         "st_kept_gen_pairs",
         "st_used_commit_model",
         "st_used_gnn_model",
+        "st_used_gru_model",
+        "method_exactness",
         "saved_output_scope",
         "solution_json_path",
     ]
@@ -1340,6 +1382,9 @@ def _append_csv(path: Path, row: Dict) -> None:
                     "constr_total_cont",
                     "constr_kept_cont",
                     "constr_ratio_cont",
+                    "constr_ratio_cont_explicit",
+                    "constr_realized_cont",
+                    "constr_ratio_cont_realized",
                     "screen_monitored_lines",
                     "explicit_added_cont",
                     "lazy_added_cont",
@@ -1356,6 +1401,8 @@ def _append_csv(path: Path, row: Dict) -> None:
                     "st_kept_gen_pairs",
                     "st_used_commit_model",
                     "st_used_gnn_model",
+                    "st_used_gru_model",
+                    "method_exactness",
                     "saved_output_scope",
                     "solution_json_path",
                 ]
@@ -1592,9 +1639,9 @@ def main():
     )
     ap.add_argument(
         "--skip-train-existing",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Skip solving TRAIN if JSON exists",
+        help="Skip solving TRAIN if JSON exists (use --no-skip-train-existing to force recompute).",
     )
     ap.add_argument(
         "--save-human-logs",
@@ -1802,6 +1849,12 @@ def main():
         action="store_true",
         help="Run a comprehensive set of ML combinations automatically",
     )
+    ap.add_argument(
+        "--from-scratch",
+        action="store_true",
+        default=False,
+        help="Force full rerun: recompute TRAIN RAW outputs even if canonical JSON already exists.",
+    )
 
     # NEW: skip previously solved runs from existing log CSVs
     ap.add_argument(
@@ -1841,16 +1894,26 @@ def main():
     # Autopilot: choose cases automatically and enable all ML modules, solve missing TRAIN
     auto_mode = bool(args.run_experiments)
     if auto_mode:
-        auto_cases = _discover_cases_from_outputs()
-        if not auto_cases:
-            auto_cases = ["matpower/case300"]
-        args.cases = auto_cases
+        # Respect explicitly supplied/default --cases; auto-discover only when empty.
+        if not args.cases:
+            auto_cases = _discover_cases_from_outputs()
+            if not auto_cases:
+                auto_cases = ["matpower/case300"]
+            args.cases = auto_cases
+            tqdm.write(f"[auto] Cases discovered from outputs: {', '.join(args.cases)}")
+        else:
+            tqdm.write(f"[auto] Using configured cases: {', '.join(args.cases)}")
         args.train_resolve_missing = True
-        args.skip_train_existing = True
+        if not args.from_scratch:
+            args.skip_train_existing = True
         args.adv_commit_hints = True
         args.adv_gru_warm = True
         args.adv_gnn_screen = True
         args.adv_adaptive_topk = True
+
+    if args.from_scratch:
+        args.skip_train_existing = False
+        tqdm.write("[from-scratch] TRAIN RAW recompute is enabled (existing canonical JSON will be overwritten).")
 
     # Resolve TRAIN strategy selection
     resolve_train = True

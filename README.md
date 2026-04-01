@@ -23,7 +23,7 @@ Highlights
 - Then install the Python packages:
 
 ```bash
-pip install gurobipy numpy scipy requests tqdm scikit-learn torch torch-geometric
+pip install -r requirements.txt
 ```
 
 3) Solve selected instances in batch and save JSON outputs
@@ -99,6 +99,12 @@ Notes:
 - Canonical training outputs remain under `src/data/output`.
 - Experiment-run solutions are isolated under `results/solutions/<mode>/...` to avoid overwriting the training database.
 - Aggregated paper metrics use end-to-end per-run time (`runtime_report_sec`, falling back to `wall_sec`).
+- If `results/raw_logs` is empty, `analysis.py` automatically falls back to `results_prev/raw_logs` for read-only reproducibility checks.
+
+Method semantics used in paper artifacts:
+- `RAW`, `WARM`, `WARM+LAZY`, `PRUNE`, `LPSCREEN`, `ACTIVESET`, `ACTIVESET+LAZY`, `STREDUCE`, `STREDUCE+LAZY` are treated as exact MILP-based methods.
+- `SHRINK+LAZY` is a shrinking-horizon approximation and is marked as heuristic (`^\dagger`) in tables/plots.
+- If ST-reduction actually uses GRU warm start at run time, the logged mode label is suffixed with `+GRU` (for transparent comparisons).
 
 ## Warm-start tools
 
@@ -240,7 +246,7 @@ Example mapping:
   - solve_instances.py: batch solver (remote listing, download, solve, JSON save)
   - fix_warm_start.py (in ml_models): repair/generate robust warm-start JSONs
 - src/paper
-  - experiments.py: publication benchmark driver across RAW / WARM / HINTS / LAZY / PRUNE / LPSCREEN modes
+  - experiments.py: publication benchmark driver across RAW/WARM/HINTS/LAZY/PRUNE/LPSCREEN/SR+LAZY/ACTIVESET/SHRINK/STREDUCE families
   - analysis.py: deduplicates raw logs and builds summary/effect-size CSVs
   - plots.py: renders figures from merged results
   - tables.py: writes LaTeX-ready tables from aggregated outputs
@@ -250,3 +256,18 @@ Example mapping:
 - src/optimization_model/helpers
   - save_json_solution.py: serialize solutions as JSON under src/data/output
   - verify_solution.py: verify model solution (in-memory) and write a report if requested
+
+## Publication checklist
+
+- Re-run benchmark logs into `results/raw_logs` before final manuscript export.
+- Rebuild artifacts with:
+  - `python -m src.paper.analysis`
+  - `python -m src.paper.plots`
+  - `python -m src.paper.tables`
+- Ensure the generated `results/tables/*.tex` and `results/figures/*` match the manuscript claims.
+- Keep exact and heuristic methods separated in discussion:
+  - exact: all modes except `SHRINK+LAZY`
+  - heuristic: `SHRINK+LAZY`
+- Include repository metadata files in release:
+  - `LICENSE`
+  - `CITATION.cff`

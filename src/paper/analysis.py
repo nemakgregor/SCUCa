@@ -16,6 +16,8 @@ What this script does:
   • NEW: fastest-mode share per case (mode_fastest_share.csv)
   • NEW: per-mode speed ratio (mode over RAW) stats for bar-plots (mode_speed_stats.csv)
   • NEW: per-row flags (with_LAZY/GNN/PRUNE/COMMIT/GRU/BANDIT) for group-wise plots (flags added in merged_results.csv)
+  • NEW: exact vs heuristic method tags (for publication-safe comparisons)
+  • NEW: explicit vs realized contingency ratio fields for hybrid methods
 """
 
 from __future__ import annotations
@@ -42,6 +44,14 @@ OUT_EFFECTS_WLZ = RESULTS_DIR / "effects_wlz_vs_raw.csv"
 OUT_OVERALL = RESULTS_DIR / "overall_summary.csv"
 OUT_MODE_SPEED = RESULTS_DIR / "mode_speed_stats.csv"  # NEW: for bar-plot speed ratios
 RAW_BASELINE_MODE = "RAW"
+HEURISTIC_MODES = {"SHRINK+LAZY"}
+
+
+def _mode_exactness(mode: str) -> str:
+    m = str(mode).upper()
+    if m in HEURISTIC_MODES:
+        return "heuristic"
+    return "exact"
 
 
 def _runtime_col(df: pd.DataFrame) -> str:
@@ -55,7 +65,16 @@ def _runtime_col(df: pd.DataFrame) -> str:
 def _read_all_logs() -> pd.DataFrame:
     files = sorted(glob.glob(str(RAW_DIR / "*.csv")))
     if not files:
-        raise FileNotFoundError(f"No log CSVs found in {RAW_DIR}")
+        fallback = Path("results_prev") / "raw_logs"
+        files = sorted(glob.glob(str(fallback / "*.csv")))
+        if files:
+            print(
+                f"[analysis] results/raw_logs is empty; using fallback logs from {fallback}"
+            )
+        else:
+            raise FileNotFoundError(
+                f"No log CSVs found in {RAW_DIR} or in fallback {fallback}"
+            )
     dfs = []
     for f in files:
         df = pd.read_csv(f)
@@ -79,6 +98,9 @@ def _read_all_logs() -> pd.DataFrame:
         "constr_total_cont",
         "constr_kept_cont",
         "constr_ratio_cont",
+        "constr_ratio_cont_explicit",
+        "constr_realized_cont",
+        "constr_ratio_cont_realized",
         "wall_sec",
         "runtime_report_sec",
         "screen_setup_sec",
@@ -98,6 +120,7 @@ def _read_all_logs() -> pd.DataFrame:
         "st_kept_gen_pairs",
         "st_used_commit_model",
         "st_used_gnn_model",
+        "st_used_gru_model",
         "mip_gap",
         "max_constraint_residual",
         "objective_inconsistency",
@@ -137,14 +160,35 @@ def _read_all_logs() -> pd.DataFrame:
             pd.to_numeric(data["runtime_sec"], errors="coerce")
         )
 
+    # Backward-compatible aliases for older logs.
+    if "constr_ratio_cont_explicit" not in data.columns:
+        data["constr_ratio_cont_explicit"] = pd.to_numeric(
+            data.get("constr_ratio_cont", np.nan), errors="coerce"
+        )
+    if "constr_ratio_cont_realized" not in data.columns:
+        data["constr_ratio_cont_realized"] = np.nan
+    if "constr_realized_cont" not in data.columns:
+        data["constr_realized_cont"] = np.nan
+    if "method_exactness" not in data.columns:
+        data["method_exactness"] = ""
+
     # Normalize mode casing a bit
     data["mode_clean"] = data["mode"].str.upper()
+    exactness_from_mode = data["mode_clean"].apply(_mode_exactness)
+    data["method_exactness"] = data["method_exactness"].astype(str).str.lower().str.strip()
+    data.loc[
+        ~data["method_exactness"].isin(["exact", "heuristic"]), "method_exactness"
+    ] = exactness_from_mode.loc[
+        ~data["method_exactness"].isin(["exact", "heuristic"])
+    ]
 
     # Add technique flags for grouping/plots
     data["with_LAZY"] = data["mode"].str.contains("LAZY", case=False, na=False)
     data["with_PRUNE"] = data["mode"].str.contains("PRUNE", case=False, na=False)
     data["with_LPSCREEN"] = data["mode"].str.contains("LPSCREEN", case=False, na=False)
-    data["with_SR"] = data["mode"].str.contains(r"\+SR(\+|$)", case=False, na=False, regex=True)
+    data["with_SR"] = data["mode"].str.contains(
+        r"\+SR(?:\+|$)", case=False, na=False, regex=True
+    )
     data["with_ACTIVESET"] = data["mode"].str.contains("ACTIVESET", case=False, na=False)
     data["with_SHRINK"] = data["mode"].str.contains("SHRINK", case=False, na=False)
     data["with_STREDUCE"] = data["mode"].str.contains("STREDUCE", case=False, na=False)
@@ -152,6 +196,8 @@ def _read_all_logs() -> pd.DataFrame:
     data["with_COMMIT"] = data["mode"].str.contains("COMMIT", case=False, na=False)
     data["with_GRU"] = data["mode"].str.contains("GRU", case=False, na=False)
     data["with_BANDIT"] = data["mode"].str.contains("BANDIT", case=False, na=False)
+    data["is_heuristic_method"] = data["method_exactness"] == "heuristic"
+    data["is_exact_method"] = data["method_exactness"] == "exact"
     data["is_raw_baseline"] = data["mode_clean"] == RAW_BASELINE_MODE
 
     # Keep the latest row per (case, instance, mode) to avoid double counting reruns.
@@ -333,6 +379,7 @@ def _aggregate_basic(df: pd.DataFrame) -> pd.DataFrame:
                 {
                     "case_folder": case,
                     "mode": mode,
+                    "method_exactness": _mode_exactness(mode),
                     "N": int(len(g_mode)),
                     "runtime_median": med_rt,
                     "runtime_IQR": iqr_rt,
@@ -520,6 +567,7 @@ def _build_extended_summary(
                 {
                     "case_folder": case,
                     "mode": mode,
+                    "method_exactness": _mode_exactness(mode),
                     "N": int(len(g_mode)),
                     "runtime_median": med_rt,
                     "runtime_IQR": iqr_rt,
@@ -579,6 +627,7 @@ def _overall_summary(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "mode": mode,
+                "method_exactness": _mode_exactness(mode),
                 "N": int(len(g)),
                 "runtime_median": med_rt,
                 "runtime_IQR": iqr_rt,
@@ -678,6 +727,7 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
      - N (paired count)
      - success_rate_strict (violations == 'OK')
      - success_rate_status (status in OPTIMAL/SUBOPTIMAL/TIME_LIMIT)
+     - method_exactness (exact / heuristic)
     """
     if pairs.empty:
         return pd.DataFrame(
@@ -688,6 +738,7 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
                 "N",
                 "success_rate_strict",
                 "success_rate_status",
+                "method_exactness",
             ]
         )
 
@@ -718,7 +769,15 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
         .reset_index()
     )
 
-    out = stats.merge(succ, on="mode", how="left")
+    mode_exact = (
+        d[["mode", "method_exactness"]]
+        .dropna()
+        .drop_duplicates(subset=["mode"], keep="last")
+    )
+    out = stats.merge(succ, on="mode", how="left").merge(mode_exact, on="mode", how="left")
+    out["method_exactness"] = out["method_exactness"].fillna(
+        out["mode"].map(_mode_exactness)
+    )
     return out
 
 
