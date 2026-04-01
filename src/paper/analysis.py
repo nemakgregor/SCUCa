@@ -85,6 +85,19 @@ def _read_all_logs() -> pd.DataFrame:
         "screen_monitored_lines",
         "explicit_added_cont",
         "lazy_added_cont",
+        "active_set_iters",
+        "active_set_added",
+        "active_set_dropped",
+        "shrink_window_count",
+        "shrink_window_size",
+        "shrink_overlap",
+        "fixed_commit_vars",
+        "fixed_commit_on",
+        "fixed_commit_off",
+        "st_kept_line_pairs",
+        "st_kept_gen_pairs",
+        "st_used_commit_model",
+        "st_used_gnn_model",
         "mip_gap",
         "max_constraint_residual",
         "objective_inconsistency",
@@ -132,6 +145,9 @@ def _read_all_logs() -> pd.DataFrame:
     data["with_PRUNE"] = data["mode"].str.contains("PRUNE", case=False, na=False)
     data["with_LPSCREEN"] = data["mode"].str.contains("LPSCREEN", case=False, na=False)
     data["with_SR"] = data["mode"].str.contains(r"\+SR(\+|$)", case=False, na=False, regex=True)
+    data["with_ACTIVESET"] = data["mode"].str.contains("ACTIVESET", case=False, na=False)
+    data["with_SHRINK"] = data["mode"].str.contains("SHRINK", case=False, na=False)
+    data["with_STREDUCE"] = data["mode"].str.contains("STREDUCE", case=False, na=False)
     data["with_GNN"] = data["mode"].str.contains("GNN", case=False, na=False)
     data["with_COMMIT"] = data["mode"].str.contains("COMMIT", case=False, na=False)
     data["with_GRU"] = data["mode"].str.contains("GRU", case=False, na=False)
