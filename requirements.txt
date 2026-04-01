@@ -5,6 +5,11 @@ tqdm
 gurobipy
 networkx
 matplotlib
+seaborn
 torch
 torch_geometric
 scikit-learn
+catboost
+joblib
+pandas
+psutil

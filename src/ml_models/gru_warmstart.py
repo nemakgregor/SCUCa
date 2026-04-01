@@ -91,7 +91,7 @@ class GRUDispatchWarmStart:
         self.meta_path = (self.base_dir / "meta.json").resolve()
         self.model: Optional[_GRU] = None
 
-    def _build_training(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def _build_training(self, restrict_to_names: Optional[set] = None) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         outs = _list_outputs(self.case)
         X_seq = []
         Y_seq = []
@@ -102,6 +102,8 @@ class GRUDispatchWarmStart:
             name = op.resolve().relative_to(DataParams._OUTPUT.resolve()).as_posix()
             if name.endswith(".json"):
                 name = name[:-5]
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
             try:
                 inst = read_benchmark(name, quiet=True)
                 sc = inst.deterministic
@@ -161,14 +163,17 @@ class GRUDispatchWarmStart:
         return Xb, Yb
 
     def pretrain(
-        self, epochs: int = 60, lr: float = 2e-3, force: bool = False
+        self, epochs: int = 60, lr: float = 2e-3, force: bool = False, seed: int = 42,
+        restrict_to_names: Optional[set] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        data = self._build_training()
+        data = self._build_training(restrict_to_names=restrict_to_names)
         if data is None:
             print("[gru_ws] No training data found.")
             return None
+        torch.manual_seed(seed)
+        np.random.seed(seed)
         Xb, Yb = data  # [N, T, 5], [N, T]
         model = _GRU(in_dim=Xb.shape[2], hidden=32, layers=2)
         opt = torch.optim.Adam(model.parameters(), lr=lr)

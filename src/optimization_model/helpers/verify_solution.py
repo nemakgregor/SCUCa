@@ -63,6 +63,15 @@ class CheckItem:
     value: float  # 0 means OK; otherwise worst violation
 
 
+def _startup_cost_for_gen(gen) -> float:
+    try:
+        if gen.startup_categories:
+            return float(min(cat.cost for cat in gen.startup_categories))
+    except Exception:
+        pass
+    return 0.0
+
+
 def _extract_vars_to_numpy(
     model, var_dict, keys: List[str], T: int, default=0.0
 ) -> np.ndarray:
@@ -138,6 +147,8 @@ def verify_solution(
     covn_val = _extract_vars_to_numpy(
         model, getattr(model, "contingency_overflow_neg", None), line_names, T
     )
+    reserve_td = getattr(model, "reserve", None)
+    shortfall_td = getattr(model, "reserve_shortfall", None)
 
     # Limits (handle 0 or None)
     F_em = np.zeros((len(lines), T))
@@ -219,6 +230,58 @@ def verify_solution(
     worst_bal = np.max(np.abs(total_gen - total_load))
     checks.append(CheckItem(ID_C_BAL, "Power balance", worst_bal))
 
+    # C-104/C-105: Reserve headroom and requirement
+    worst_res_head = 0.0
+    worst_res_req = 0.0
+    if reserves:
+        eligible_by_gen: Dict[str, List[Reserve]] = {}
+        for r in reserves:
+            for g in r.thermal_units:
+                eligible_by_gen.setdefault(g.name, []).append(r)
+
+        for i, gen in enumerate(units):
+            rlist = eligible_by_gen.get(gen.name, [])
+            if not rlist:
+                continue
+            reserve_sum = np.zeros(T)
+            for r in rlist:
+                for t in range(T):
+                    try:
+                        reserve_sum[t] += float(reserve_td[r.name, gen.name, t].X)
+                    except Exception:
+                        pass
+            headroom = (
+                np.array([float(gen.max_power[t]) - float(gen.min_power[t]) for t in range(T)])
+                * u_val[i, :]
+            )
+            above_min = p_val[i, :] - p_min_arr[i, :] * u_val[i, :]
+            viol_head = above_min + reserve_sum - headroom
+            worst_res_head = max(worst_res_head, float(np.max(viol_head)))
+
+        for r in reserves:
+            provided = np.zeros(T)
+            shortfall = np.zeros(T)
+            for g in r.thermal_units:
+                for t in range(T):
+                    try:
+                        provided[t] += float(reserve_td[r.name, g.name, t].X)
+                    except Exception:
+                        pass
+            for t in range(T):
+                try:
+                    shortfall[t] = float(shortfall_td[r.name, t].X)
+                except Exception:
+                    shortfall[t] = 0.0
+            req = np.array([float(r.amount[t]) for t in range(T)])
+            viol_req = req - (provided + shortfall)
+            worst_res_req = max(worst_res_req, float(np.max(viol_req)))
+    checks.append(
+        CheckItem(ID_C_RES_HEAD, "Reserve headroom linking", max(0.0, worst_res_head))
+    )
+    checks.append(
+        CheckItem(ID_C_RES_REQ, "Reserve requirement", max(0.0, worst_res_req))
+    )
+
     # C-106: Startup/Shutdown Definition (u[t] - u[t-1] = v[t] - w[t])
     # Use roll for t-1
     u_prev = np.roll(u_val, 1, axis=1)
@@ -295,6 +358,55 @@ def verify_solution(
 
     checks.append(CheckItem(ID_C_MIN_UP, "Min up time", worst_mu))
     checks.append(CheckItem(ID_C_MIN_DOWN, "Min down time", worst_md))
+
+    # C-112: Initial horizon enforcement for min up/down
+    worst_init = 0.0
+    for i, gen in enumerate(units):
+        Lu = int(getattr(gen, "min_up", 0) or 0)
+        Ld = int(getattr(gen, "min_down", 0) or 0)
+        s = getattr(gen, "initial_status", None)
+        if s is None:
+            continue
+
+        if s > 0 and Lu > 0:
+            remaining_on = max(0, Lu - int(s))
+            if remaining_on > 0:
+                window = u_val[i, : min(remaining_on, T)]
+                if window.size:
+                    worst_init = max(worst_init, float(np.max(np.abs(window - 1.0))))
+
+        if s < 0 and Ld > 0:
+            remaining_off = max(0, Ld - abs(int(s)))
+            if remaining_off > 0:
+                window = u_val[i, : min(remaining_off, T)]
+                if window.size:
+                    worst_init = max(worst_init, float(np.max(np.abs(window))))
+    checks.append(CheckItem(ID_C_MIN_INIT, "Initial min up/down enforcement", worst_init))
+
+    # C-108: Base-case line flow PTDF equality
+    worst_flow_def = 0.0
+    if lines:
+        buses = scenario.buses
+        ref_1b = getattr(scenario, "ptdf_ref_bus_index", buses[0].index)
+        non_ref_indices = sorted([b.index for b in buses if b.index != ref_1b])
+        gen_idx_by_name = {g.name: i for i, g in enumerate(units)}
+        inj_by_bus: Dict[int, np.ndarray] = {}
+        for b in buses:
+            idxs = [gen_idx_by_name[g.name] for g in b.thermal_units if g.name in gen_idx_by_name]
+            gen_sum = np.sum(p_val[idxs, :], axis=0) if idxs else np.zeros(T)
+            inj_by_bus[b.index] = gen_sum - np.array([float(x) for x in b.load[:T]])
+
+        isf_csr = scenario.isf.tocsr()
+        for i, line in enumerate(lines):
+            row = isf_csr.getrow(line.index - 1)
+            calc = np.zeros(T)
+            for col, coeff in zip(row.indices.tolist(), row.data.tolist()):
+                bus_1b = non_ref_indices[col]
+                calc += float(coeff) * inj_by_bus[bus_1b]
+            worst_flow_def = max(
+                worst_flow_def, float(np.max(np.abs(f_val[i, :] - calc)))
+            )
+    checks.append(CheckItem(ID_C_FLOW_DEF, "Line flow PTDF equality", worst_flow_def))
 
     # C-109: Base Flow Limits
     if lines:
@@ -397,6 +509,44 @@ def verify_solution(
 
     checks.append(CheckItem(ID_C_CONT_LINE, "Post-cont line limits", worst_line_cont))
     checks.append(CheckItem(ID_C_CONT_GEN, "Post-cont gen limits", worst_gen_cont))
+
+    # O-301: Objective consistency
+    obj_inconsistency = 0.0
+    try:
+        obj_calc = 0.0
+        for i, gen in enumerate(units):
+            for t in range(T):
+                obj_calc += float(u_val[i, t]) * float(gen.min_power_cost[t])
+                n_segments = len(gen.segments) if gen.segments else 0
+                if n_segments > 0 and seg_vars:
+                    for s in range(n_segments):
+                        v = seg_vars.get((gen.name, t, s))
+                        if v is not None:
+                            obj_calc += float(v.X) * float(gen.segments[s].cost[t])
+                obj_calc += float(su_val[i, t]) * _startup_cost_for_gen(gen)
+
+        if reserves and shortfall_td is not None:
+            for r in reserves:
+                for t in range(T):
+                    try:
+                        obj_calc += float(shortfall_td[r.name, t].X) * float(
+                            r.shortfall_penalty
+                        )
+                    except Exception:
+                        pass
+
+        for i, line in enumerate(lines):
+            pen = np.array([float(x) for x in line.flow_penalty[:T]])
+            obj_calc += float(np.sum((ovp_val[i, :] + ovn_val[i, :]) * pen))
+            obj_calc += float(
+                np.sum((covp_val[i, :] + covn_val[i, :]) * pen * CONT_PENALTY_FACTOR)
+            )
+
+        model_obj = float(model.ObjVal)
+        obj_inconsistency = abs(model_obj - obj_calc)
+    except Exception:
+        obj_inconsistency = float("nan")
+    checks.append(CheckItem(ID_O_TOTAL, "Objective consistency", obj_inconsistency))
 
     # Final decision
     overall_ok = all(c.value <= EPS for c in checks)

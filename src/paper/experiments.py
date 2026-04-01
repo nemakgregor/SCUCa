@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set, Callable
 
 import glob
 import psutil
@@ -29,19 +29,38 @@ from src.optimization_model.helpers.branching_hints import (
 )
 from src.optimization_model.helpers.lazy_contingency_cb import (
     attach_lazy_contingency_callback,
+    optimize_with_lazy_callback,
     LazyContingencyConfig,
 )
 from src.optimization_model.helpers.save_json_solution import (
     save_solution_as_json,
     compute_output_path,
 )
-from src.optimization_model.helpers.verify_solution import verify_solution
+from src.optimization_model.helpers.verify_solution import (
+    verify_solution,
+    verify_solution_to_log,
+)
+from src.optimization_model.helpers.save_solution import save_solution_to_log
+from src.optimization_model.helpers.run_utils import (
+    allocate_run_id,
+    make_log_filename,
+)
 
 # ML modules
 from src.ml_models.commitment_hints import CommitmentHints
-from src.ml_models.gnn_screening import GNNLineScreener
-from src.ml_models.gru_warmstart import GRUDispatchWarmStart
 from src.ml_models.bandits import EpsilonGreedyTopK
+from src.ml_models.lp_screening import LPScreener
+from src.scuc_sr.analysis import radii_for_scenario
+
+try:
+    from src.ml_models.gnn_screening import GNNLineScreener
+except Exception:
+    GNNLineScreener = None
+
+try:
+    from src.ml_models.gru_warmstart import GRUDispatchWarmStart
+except Exception:
+    GRUDispatchWarmStart = None
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +82,10 @@ def _configure_logging():
 def _case_tag(case_folder: str) -> str:
     cf = case_folder.strip().strip("/\\").replace("\\", "/")
     return "".join(ch if ch.isalnum() else "_" for ch in cf).strip("_").lower()
+
+
+def _experiment_solution_base_dir(mode_label: str) -> Path:
+    return Path("results") / "solutions" / _case_tag(mode_label)
 
 
 def _list_case_instances(case_folder: str) -> List[str]:
@@ -169,8 +192,8 @@ class PeakMemSampler:
 @dataclass
 class RunConfig:
     # Base mode
-    mode: str  # RAW | WARM | WARM+HINTS | WARM+LAZY | WARM+PRUNE
-    tau: Optional[float] = None  # for WARM+PRUNE
+    mode: str  # RAW | WARM | WARM+HINTS | WARM+LAZY | WARM+PRUNE | WARM+LPSCREEN | WARM+PRUNE+LAZY | WARM+LPSCREEN+LAZY | WARM+SR+LAZY
+    tau: Optional[float] = None  # for WARM+PRUNE / WARM+LPSCREEN and lazy hybrids
 
     # Solver controls
     time_limit: int = 600
@@ -197,8 +220,32 @@ class RunConfig:
     topk_candidates: Optional[List[int]] = None
     topk_epsilon: float = 0.1
 
+    # Monitored-set / SR settings
+    sr_sigma: float = 0.3
+    sr_l2_thr: float = 400.0
+    sr_sigma_thr: float = 5.0
+
     # Logs
     save_human_logs: bool = False
+    save_json_solution: bool = True
+    save_json_to_canonical_output: bool = False
+
+
+def _save_logs_if_requested(sc, model, enabled: bool) -> None:
+    if not enabled:
+        return
+    run_id = allocate_run_id(sc.name or "scenario")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    try:
+        sol_fname = make_log_filename("solution", sc.name, run_id, ts)
+        save_solution_to_log(sc, model, filename=sol_fname)
+    except Exception:
+        pass
+    try:
+        ver_fname = make_log_filename("verify", sc.name, run_id, ts)
+        verify_solution_to_log(sc, model, filename=ver_fname)
+    except Exception:
+        pass
 
 
 def _build_contingency_filter(
@@ -230,8 +277,47 @@ def _build_contingency_filter(
         return None
 
 
+def _allowed_lines_by_radius(
+    sc,
+    l2_thr: float = 400.0,
+    sigma_thr: float = 5.0,
+    balance: str = "agc",
+    sigma_sr: float = 0.3,
+) -> Set[str]:
+    allowed: Set[str] = set()
+    try:
+        rd = radii_for_scenario(sc, t=0, balance=balance, sigma_sr=float(sigma_sr))
+        l2_map = rd.get("l2", {})
+        sig_map = rd.get("sigma", {})
+
+        for ln in sc.lines or []:
+            a, b = sorted((ln.source.name, ln.target.name))
+            key = f"{a}-{b}"
+            r_l2 = l2_map.get(key)
+            r_sig = sig_map.get(key)
+
+            keep = False
+            if r_l2 is None and r_sig is None:
+                keep = True
+            else:
+                if r_l2 is not None and r_l2 <= l2_thr:
+                    keep = True
+                if r_sig is not None and r_sig <= sigma_thr:
+                    keep = True
+
+            if keep:
+                allowed.add(ln.name)
+    except Exception:
+        for ln in sc.lines or []:
+            allowed.add(ln.name)
+    return allowed
+
+
 def _estimate_cont_counts(
-    sc, filter_predicate: Optional[callable]
+    sc,
+    filter_predicate: Optional[Callable],
+    keep_masks: Optional[Dict[str, Set[Tuple[str, str]]]] = None,
+    monitored_line_whitelist: Optional[Set[str]] = None,
 ) -> Tuple[int, int, int, int]:
     """
     Estimate total and kept contingency constraints count for (line outages, gen outages).
@@ -259,6 +345,14 @@ def _estimate_cont_counts(
     total_gen = 0
     kept_gen = 0
 
+    keep_line_pairs = (keep_masks or {}).get("line")
+    keep_gen_pairs = (keep_masks or {}).get("gen")
+
+    def _mon_allowed(line_name: str) -> bool:
+        if monitored_line_whitelist is None:
+            return True
+        return line_name in monitored_line_whitelist
+
     # Line outage
     for cont in contingencies:
         if not cont.lines:
@@ -275,21 +369,28 @@ def _estimate_cont_counts(
                 if line_l is None:
                     continue
                 total_line += 2 * T
+                if not _mon_allowed(line_l.name):
+                    continue
+                if keep_line_pairs is not None and (
+                    line_l.name,
+                    out_line.name,
+                ) not in keep_line_pairs:
+                    continue
                 if filter_predicate is None:
                     kept_line += 2 * T
-                else:
-                    for t in range(T):
-                        F_em = float(line_l.emergency_limit[t])
-                        keep = True
-                        try:
-                            keep = bool(
-                                filter_predicate(
-                                    "line", line_l, out_line, t, float(alpha), F_em
-                                )
+                    continue
+                for t in range(T):
+                    F_em = float(line_l.emergency_limit[t])
+                    keep = True
+                    try:
+                        keep = bool(
+                            filter_predicate(
+                                "line", line_l, out_line, t, float(alpha), F_em
                             )
-                        except Exception:
-                            keep = True
-                        kept_line += 2 if keep else 0
+                        )
+                    except Exception:
+                        keep = True
+                    kept_line += 2 if keep else 0
 
     # Gen outage
     for cont in contingencies:
@@ -301,19 +402,26 @@ def _estimate_cont_counts(
                 # coeff zero => constraints still exist (coeff=0), +/- per line
                 for line_l in lines:
                     total_gen += 2 * T
+                    if not _mon_allowed(line_l.name):
+                        continue
+                    if keep_gen_pairs is not None and (
+                        line_l.name,
+                        gen.name,
+                    ) not in keep_gen_pairs:
+                        continue
                     if filter_predicate is None:
                         kept_gen += 2 * T
-                    else:
-                        for t in range(T):
-                            F_em = float(line_l.emergency_limit[t])
+                        continue
+                    for t in range(T):
+                        F_em = float(line_l.emergency_limit[t])
+                        keep = True
+                        try:
+                            keep = bool(
+                                filter_predicate("gen", line_l, gen, t, 0.0, F_em)
+                            )
+                        except Exception:
                             keep = True
-                            try:
-                                keep = bool(
-                                    filter_predicate("gen", line_l, gen, t, 0.0, F_em)
-                                )
-                            except Exception:
-                                keep = True
-                            kept_gen += 2 if keep else 0
+                        kept_gen += 2 if keep else 0
             else:
                 col = isf.getcol(col_by_bus_1b[bidx])
                 coeff_map = {
@@ -324,19 +432,26 @@ def _estimate_cont_counts(
                     if abs(coeff) < _ISF_TOL:
                         continue
                     total_gen += 2 * T
+                    if not _mon_allowed(line_l.name):
+                        continue
+                    if keep_gen_pairs is not None and (
+                        line_l.name,
+                        gen.name,
+                    ) not in keep_gen_pairs:
+                        continue
                     if filter_predicate is None:
                         kept_gen += 2 * T
-                    else:
-                        for t in range(T):
-                            F_em = float(line_l.emergency_limit[t])
+                        continue
+                    for t in range(T):
+                        F_em = float(line_l.emergency_limit[t])
+                        keep = True
+                        try:
+                            keep = bool(
+                                filter_predicate("gen", line_l, gen, t, coeff, F_em)
+                            )
+                        except Exception:
                             keep = True
-                            try:
-                                keep = bool(
-                                    filter_predicate("gen", line_l, gen, t, coeff, F_em)
-                                )
-                            except Exception:
-                                keep = True
-                            kept_gen += 2 if keep else 0
+                        kept_gen += 2 if keep else 0
 
     return total_line + total_gen, kept_line + kept_gen, total_line, kept_line
 
@@ -353,13 +468,21 @@ def _build_mode_label(base: str, cfg: RunConfig) -> str:
       - WARM+LAZY+K128
       - WARM+LAZY+BANDIT+COMMIT
       - WARM+PRUNE-0.50+GNN
+      - WARM+PRUNE-0.50+LAZY
     """
     parts = [base]
-    # Tau for PRUNE
-    if base == "WARM+PRUNE" and (cfg.tau is not None):
-        parts[-1] = f"{base}-{cfg.tau:.2f}"
+    # Tau for PRUNE / LPSCREEN
+    if cfg.tau is not None:
+        if base == "WARM+PRUNE":
+            parts[-1] = f"WARM+PRUNE-{cfg.tau:.2f}"
+        elif base == "WARM+LPSCREEN":
+            parts[-1] = f"WARM+LPSCREEN-{cfg.tau:.2f}"
+        elif base == "WARM+PRUNE+LAZY":
+            parts[-1] = f"WARM+PRUNE-{cfg.tau:.2f}+LAZY"
+        elif base == "WARM+LPSCREEN+LAZY":
+            parts[-1] = f"WARM+LPSCREEN-{cfg.tau:.2f}+LAZY"
     # Feature suffixes
-    if cfg.use_gnn_screen and base != "WARM+LAZY":  # GNN ignored for LAZY
+    if cfg.use_gnn_screen and "LAZY" not in base:
         parts.append("GNN")
     if cfg.use_commit_hints:
         parts.append("COMMIT")
@@ -384,51 +507,144 @@ def solve_one(
     started_at = time.time()
     inst = read_benchmark(instance_name, quiet=True)
     sc = inst.deterministic
+    case_folder = "/".join(instance_name.split("/")[:2])
 
     # Build final label now for logging
     mode_label = _build_mode_label(mode_cfg.mode, mode_cfg)
     tqdm.write(f"[run] {instance_name} | {mode_label}")
     logger.info("Solving %s with %s", instance_name, mode_label)
 
-    # Redundancy pruning predicate (PRUNE only; explicit models)
+    pure_lazy_mode = mode_cfg.mode == "WARM+LAZY"
+    prune_lazy_mode = mode_cfg.mode == "WARM+PRUNE+LAZY"
+    lpscreen_lazy_mode = mode_cfg.mode == "WARM+LPSCREEN+LAZY"
+    sr_lazy_mode = mode_cfg.mode == "WARM+SR+LAZY"
+    use_lazy = pure_lazy_mode or prune_lazy_mode or lpscreen_lazy_mode or sr_lazy_mode
+    lazy_build_only = pure_lazy_mode or prune_lazy_mode or lpscreen_lazy_mode
+
+    rc_keep_masks = None
+    lp_keep_masks = None
+    lp_stats = None
+    monitored_line_whitelist = None
+    screen_setup_sec = 0.0
+
+    # Redundancy pruning predicate / keep masks (PRUNE family)
     rc_pred = None
     if mode_cfg.mode.startswith("WARM+PRUNE"):
         tau = 0.5 if mode_cfg.tau is None else float(mode_cfg.tau)
-        rc_pred = _build_contingency_filter(
-            rc,
+        if prune_lazy_mode and rc is not None:
+            t_rc = time.time()
+            try:
+                res = rc.make_masks_for_instance(
+                    sc,
+                    instance_name,
+                    thr_rel=tau,
+                    use_train_index_only=use_train_db_for_rc,
+                    exclude_self=True,
+                )
+                if res:
+                    rc_keep_masks = {"line": res[0][0], "gen": res[0][1]}
+                    stats = res[1]
+                    dist = stats.get("distance")
+                    dist_str = f"{dist:.3f}" if dist is not None else "n/a"
+                    tqdm.write(
+                        f"[prune+lazy] Neighbor {stats.get('neighbor')} (dist={dist_str}); "
+                        f"line_pairs={len(rc_keep_masks['line'])}, gen_pairs={len(rc_keep_masks['gen'])}"
+                    )
+            except Exception as e:
+                logger.warning("PRUNE+LAZY mask build failed for %s: %s", instance_name, e)
+                rc_keep_masks = None
+            screen_setup_sec += time.time() - t_rc
+        else:
+            t_rc = time.time()
+            rc_pred = _build_contingency_filter(
+                rc,
+                sc,
+                instance_name,
+                enable=True,
+                thr_rel=tau,
+                use_train_db=use_train_db_for_rc,
+            )
+            screen_setup_sec += time.time() - t_rc
+
+    # LP relaxation screening (LPSCREEN; no training data needed)
+    lp_pred = None
+    if mode_cfg.mode.startswith("WARM+LPSCREEN"):
+        tau_lp = 0.10 if mode_cfg.tau is None else float(mode_cfg.tau)
+        try:
+            lp_screener = LPScreener()
+            if lpscreen_lazy_mode:
+                lp_res = lp_screener.screen_masks(sc, tau=tau_lp, lp_time_limit=30.0)
+                if lp_res is not None:
+                    (keep_line, keep_gen), lp_stats = lp_res
+                    lp_keep_masks = {"line": keep_line, "gen": keep_gen}
+                    tqdm.write(
+                        f"[lpscreen+lazy] LP solved in {lp_stats['lp_time']:.2f}s; "
+                        f"kept_line_pairs={lp_stats['kept_line_pairs']}, kept_gen_pairs={lp_stats['kept_gen_pairs']}"
+                    )
+                else:
+                    logger.warning("LP screening masks failed for %s", instance_name)
+            else:
+                lp_res = lp_screener.screen(sc, tau=tau_lp, lp_time_limit=30.0)
+                if lp_res is not None:
+                    lp_pred, lp_stats = lp_res
+                    tqdm.write(
+                        f"[lpscreen] LP solved in {lp_stats['lp_time']:.2f}s; "
+                        f"line_pairs={lp_stats['total_line_pairs']}, gen_pairs={lp_stats['total_gen_pairs']}"
+                    )
+                else:
+                    logger.warning("LP screening failed for %s", instance_name)
+            if lp_stats is not None:
+                screen_setup_sec += float(lp_stats.get("screen_time", 0.0) or 0.0)
+        except Exception as e:
+            logger.warning("LP screening error for %s: %s", instance_name, e)
+
+    if sr_lazy_mode:
+        t_sr = time.time()
+        monitored_line_whitelist = _allowed_lines_by_radius(
             sc,
-            instance_name,
-            enable=True,
-            thr_rel=tau,
-            use_train_db=use_train_db_for_rc,
+            l2_thr=float(mode_cfg.sr_l2_thr),
+            sigma_thr=float(mode_cfg.sr_sigma_thr),
+            sigma_sr=float(mode_cfg.sr_sigma),
+        )
+        screen_setup_sec += time.time() - t_sr
+        tqdm.write(
+            f"[sr+lazy] explicit monitored lines={len(monitored_line_whitelist)}/{len(sc.lines or [])}"
         )
 
-    # GNN screening — explicit models only (RAW, WARM, WARM+PRUNE)
+    # GNN screening — explicit models only
     gnn_pred = None
-    if mode_cfg.mode != "WARM+LAZY" and bool(mode_cfg.use_gnn_screen):
-        try:
-            case_folder = "/".join(instance_name.split("/")[:2])
-            gnn = GNNLineScreener(case_folder=case_folder)
-            if gnn.ensure_trained():
-                gnn_pred = gnn.make_pruning_predicate(
-                    sc, thr_pred=float(mode_cfg.gnn_thr)
-                )
-        except Exception:
-            gnn_pred = None
+    if not use_lazy and bool(mode_cfg.use_gnn_screen):
+        if GNNLineScreener is None:
+            logger.warning("GNN screening requested for %s but torch/gnn deps are unavailable.", instance_name)
+        else:
+            try:
+                case_folder = "/".join(instance_name.split("/")[:2])
+                gnn = GNNLineScreener(case_folder=case_folder)
+                if gnn.ensure_trained():
+                    gnn_pred = gnn.make_pruning_predicate(
+                        sc, thr_pred=float(mode_cfg.gnn_thr)
+                    )
+            except Exception:
+                gnn_pred = None
 
-    # Combine predicates if both available (safer)
+    # Combine predicates if multiple available (AND logic = safer)
     def _combine_pred(kind, line_l, out_obj, t, coeff, F_em):
         ok_rc = (
             True
             if rc_pred is None
             else bool(rc_pred(kind, line_l, out_obj, t, coeff, F_em))
         )
+        ok_lp = (
+            True
+            if lp_pred is None
+            else bool(lp_pred(kind, line_l, out_obj, t, coeff, F_em))
+        )
         ok_gn = (
             True
             if gnn_pred is None
             else bool(gnn_pred(kind, line_l, out_obj, t, coeff, F_em))
         )
-        return ok_rc and ok_gn
+        return ok_rc and ok_lp and ok_gn
 
     # Final predicate for explicit runs
     cont_filter = None
@@ -442,14 +658,22 @@ def solve_one(
         cont_filter = (
             _combine_pred if (rc_pred is not None or gnn_pred is not None) else None
         )
+    elif mode_cfg.mode == "WARM+LPSCREEN":
+        cont_filter = (
+            _combine_pred if (lp_pred is not None or gnn_pred is not None) else None
+        )
 
-    # Build model with or without lazy contingencies
-    use_lazy = mode_cfg.mode == "WARM+LAZY"
+    # Build model with explicit contingencies, lazy-only contingencies, or a monitored-set hybrid.
     model = build_model(
         scenario=sc,
-        contingency_filter=None if use_lazy else cont_filter,
-        use_lazy_contingencies=bool(use_lazy),
+        contingency_filter=None if (use_lazy or sr_lazy_mode) else cont_filter,
+        use_lazy_contingencies=bool(lazy_build_only),
+        radius_line_whitelist=monitored_line_whitelist,
     )
+    try:
+        model.update()
+    except Exception:
+        pass
 
     # Root size
     num_vars_root = int(getattr(model, "NumVars", 0))
@@ -457,7 +681,16 @@ def solve_one(
 
     # Apply warm starts (WARM-family)
     applied_starts = 0
-    if mode_cfg.mode in ("WARM", "WARM+HINTS", "WARM+LAZY", "WARM+PRUNE"):
+    if mode_cfg.mode in (
+        "WARM",
+        "WARM+HINTS",
+        "WARM+LAZY",
+        "WARM+PRUNE",
+        "WARM+LPSCREEN",
+        "WARM+PRUNE+LAZY",
+        "WARM+LPSCREEN+LAZY",
+        "WARM+SR+LAZY",
+    ):
         if wsp is not None:
             try:
                 wsp.generate_and_save_warm_start(
@@ -466,18 +699,29 @@ def solve_one(
                     exclude_self=True,
                     auto_fix=True,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Warm-start generation failed for %s: %s", instance_name, e)
             try:
                 applied_starts = wsp.apply_warm_start_to_model(
                     model, sc, instance_name, mode="repair"
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning("Warm-start apply failed for %s: %s", instance_name, e)
                 applied_starts = 0
 
     # Commitment hints (if requested)
     if bool(mode_cfg.use_commit_hints) and (
-        mode_cfg.mode in ("WARM", "WARM+HINTS", "WARM+LAZY", "WARM+PRUNE")
+        mode_cfg.mode
+        in (
+            "WARM",
+            "WARM+HINTS",
+            "WARM+LAZY",
+            "WARM+PRUNE",
+            "WARM+LPSCREEN",
+            "WARM+PRUNE+LAZY",
+            "WARM+LPSCREEN+LAZY",
+            "WARM+SR+LAZY",
+        )
         or (mode_cfg.mode == "RAW" and bool(mode_cfg.commit_on_raw))
     ):
         try:
@@ -491,8 +735,8 @@ def solve_one(
                     thr=float(mode_cfg.commit_thr),
                     mode=str(mode_cfg.commit_mode),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Commitment hints failed for %s: %s", instance_name, e)
 
     # GRU-based dispatch warm start (if requested)
     if bool(mode_cfg.use_gru_warm) and mode_cfg.mode in (
@@ -500,21 +744,37 @@ def solve_one(
         "WARM+HINTS",
         "WARM+LAZY",
         "WARM+PRUNE",
+        "WARM+LPSCREEN",
+        "WARM+PRUNE+LAZY",
+        "WARM+LPSCREEN+LAZY",
+        "WARM+SR+LAZY",
     ):
-        try:
-            case_folder = "/".join(instance_name.split("/")[:2])
-            gw = GRUDispatchWarmStart(case_folder=case_folder)
-            if gw.ensure_trained():
-                _ = gw.apply_to_model(model, sc)
-        except Exception:
-            pass
+        if GRUDispatchWarmStart is None:
+            logger.warning("GRU warm-start requested for %s but torch deps are unavailable.", instance_name)
+        else:
+            try:
+                case_folder = "/".join(instance_name.split("/")[:2])
+                gw = GRUDispatchWarmStart(case_folder=case_folder)
+                if gw.ensure_trained():
+                    _ = gw.apply_to_model(model, sc)
+            except Exception as e:
+                logger.warning("GRU warm-start failed for %s: %s", instance_name, e)
 
     # Branching hints from Start values (for HINTS/LAZY/PRUNE modes)
     hints_applied = 0
-    if mode_cfg.mode in ("WARM+HINTS", "WARM+LAZY", "WARM+PRUNE"):
+    if mode_cfg.mode in (
+        "WARM+HINTS",
+        "WARM+LAZY",
+        "WARM+PRUNE",
+        "WARM+LPSCREEN",
+        "WARM+PRUNE+LAZY",
+        "WARM+LPSCREEN+LAZY",
+        "WARM+SR+LAZY",
+    ):
         try:
             hints_applied = apply_branching_hints_from_starts(model)
-        except Exception:
+        except Exception as e:
+            logger.warning("Branching hints failed for %s: %s", instance_name, e)
             hints_applied = 0
 
     # Attach lazy callback for LAZY; optionally bandit for adaptive top-k
@@ -526,6 +786,16 @@ def solve_one(
             add_top_k=int(mode_cfg.lazy_top_k)
             if mode_cfg.lazy_top_k and mode_cfg.lazy_top_k > 0
             else 0,
+            keep_line_pairs=(
+                rc_keep_masks["line"]
+                if rc_keep_masks is not None
+                else (lp_keep_masks["line"] if lp_keep_masks is not None else None)
+            ),
+            keep_gen_pairs=(
+                rc_keep_masks["gen"]
+                if rc_keep_masks is not None
+                else (lp_keep_masks["gen"] if lp_keep_masks is not None else None)
+            ),
             verbose=True,
         )
         if bool(mode_cfg.use_adaptive_topk):
@@ -552,12 +822,39 @@ def solve_one(
 
     # Optimize with memory sampler
     with PeakMemSampler(interval_sec=0.2) as mems:
-        model.optimize()
+        optimize_with_lazy_callback(model)
         peak_mem_gb = mems.peak_gb
 
     # Save JSON solution
+    saved_solution_path = None
+    saved_output_scope = ""
     try:
-        save_solution_as_json(sc, model, instance_name=instance_name)
+        if bool(mode_cfg.save_json_solution):
+            out_base_dir = (
+                None
+                if bool(mode_cfg.save_json_to_canonical_output)
+                else _experiment_solution_base_dir(mode_label)
+            )
+            saved_solution_path = save_solution_as_json(
+                sc,
+                model,
+                instance_name=instance_name,
+                out_base_dir=out_base_dir,
+                extra_meta={
+                    "mode": mode_label,
+                    "case_folder": case_folder,
+                    "artifact_scope": (
+                        "canonical_train"
+                        if bool(mode_cfg.save_json_to_canonical_output)
+                        else "experiment_results"
+                    ),
+                },
+            )
+            saved_output_scope = (
+                "canonical_train"
+                if bool(mode_cfg.save_json_to_canonical_output)
+                else "experiment_results"
+            )
     except Exception:
         pass
 
@@ -598,6 +895,8 @@ def solve_one(
         obj_inconsistency = None
         violations_str = None
 
+    _save_logs_if_requested(sc, model, bool(mode_cfg.save_human_logs))
+
     # Metrics
     status_code = int(getattr(model, "Status", -1))
     runtime = float(getattr(model, "Runtime", 0.0) or 0.0)
@@ -619,15 +918,38 @@ def solve_one(
         nodes = None
 
     # Final model size
+    try:
+        model.update()
+    except Exception:
+        pass
     num_vars_final = int(getattr(model, "NumVars", 0))
     num_constrs_final = int(getattr(model, "NumConstrs", 0))
 
-    # Constraint ratio for PRUNE (static estimate)
+    explicit_added_cont = int(
+        getattr(model, "_explicit_total_cont_constraints", 0) or 0
+    )
+    lazy_stats = getattr(model, "_lazy_contingency_stats", {}) or {}
+    lazy_added_cont = int(lazy_stats.get("lazy_added", 0) or 0)
+
+    # Constraint ratio for screened / monitored-set explicit contingency burden.
     constr_total = None
     constr_kept = None
     constr_ratio = None
-    if mode_cfg.mode == "WARM+PRUNE":
-        tot, kept, _, _ = _estimate_cont_counts(sc, cont_filter)
+    if mode_cfg.mode in (
+        "WARM+PRUNE",
+        "WARM+LPSCREEN",
+        "WARM+PRUNE+LAZY",
+        "WARM+LPSCREEN+LAZY",
+        "WARM+SR+LAZY",
+    ):
+        estimate_pred = cont_filter if mode_cfg.mode in ("WARM+PRUNE", "WARM+LPSCREEN") else None
+        estimate_masks = rc_keep_masks if prune_lazy_mode else lp_keep_masks
+        tot, kept, _, _ = _estimate_cont_counts(
+            sc,
+            estimate_pred,
+            keep_masks=estimate_masks,
+            monitored_line_whitelist=monitored_line_whitelist,
+        )
         constr_total = int(tot)
         constr_kept = int(kept)
         constr_ratio = float(kept) / float(tot) if tot > 0 else 1.0
@@ -643,13 +965,14 @@ def solve_one(
     return {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "instance_name": instance_name,
-        "case_folder": "/".join(instance_name.split("/")[:2]),
+        "case_folder": case_folder,
         "mode": mode_label,  # include suffixes for clarity
         "tau": "" if mode_cfg.tau is None else f"{mode_cfg.tau:.2f}",
         "status": _status_str(status_code),
         "status_code": status_code,
         "runtime_sec": runtime,
         "wall_sec": finished_at - started_at,
+        "runtime_report_sec": finished_at - started_at,
         "mip_gap": "" if mip_gap is None else f"{mip_gap:.8f}",
         "obj_val": "" if obj_val is None else f"{obj_val:.6f}",
         "obj_bound": "" if obj_bound is None else f"{obj_bound:.6f}",
@@ -667,11 +990,19 @@ def solve_one(
         "num_vars_final": num_vars_final,
         "num_constrs_final": num_constrs_final,
         "peak_memory_gb": f"{peak_mem_gb:.3f}",
+        "screen_setup_sec": f"{screen_setup_sec:.6f}",
         "warm_start_applied_vars": applied_starts,
         "branch_hints_applied": hints_applied,
         "constr_total_cont": "" if constr_total is None else int(constr_total),
         "constr_kept_cont": "" if constr_kept is None else int(constr_kept),
         "constr_ratio_cont": "" if constr_ratio is None else f"{constr_ratio:.4f}",
+        "screen_monitored_lines": ""
+        if monitored_line_whitelist is None
+        else int(len(monitored_line_whitelist)),
+        "explicit_added_cont": explicit_added_cont,
+        "lazy_added_cont": lazy_added_cont,
+        "saved_output_scope": saved_output_scope,
+        "solution_json_path": "" if saved_solution_path is None else str(saved_solution_path),
     }
 
 
@@ -690,6 +1021,7 @@ def _prepare_csv_log(case_folder: str) -> Path:
         "status_code",
         "runtime_sec",
         "wall_sec",
+        "runtime_report_sec",
         "mip_gap",
         "obj_val",
         "obj_bound",
@@ -703,11 +1035,17 @@ def _prepare_csv_log(case_folder: str) -> Path:
         "num_vars_final",
         "num_constrs_final",
         "peak_memory_gb",
+        "screen_setup_sec",
         "warm_start_applied_vars",
         "branch_hints_applied",
         "constr_total_cont",
         "constr_kept_cont",
         "constr_ratio_cont",
+        "screen_monitored_lines",
+        "explicit_added_cont",
+        "lazy_added_cont",
+        "saved_output_scope",
+        "solution_json_path",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(header)
@@ -730,6 +1068,7 @@ def _append_csv(path: Path, row: Dict) -> None:
                     "status_code",
                     "runtime_sec",
                     "wall_sec",
+                    "runtime_report_sec",
                     "mip_gap",
                     "obj_val",
                     "obj_bound",
@@ -743,106 +1082,131 @@ def _append_csv(path: Path, row: Dict) -> None:
                     "num_vars_final",
                     "num_constrs_final",
                     "peak_memory_gb",
+                    "screen_setup_sec",
                     "warm_start_applied_vars",
                     "branch_hints_applied",
                     "constr_total_cont",
                     "constr_kept_cont",
                     "constr_ratio_cont",
+                    "screen_monitored_lines",
+                    "explicit_added_cont",
+                    "lazy_added_cont",
+                    "saved_output_scope",
+                    "solution_json_path",
                 ]
             ]
         )
 
 
-def _auto_mode_list(args: argparse.Namespace) -> List[RunConfig]:
+_SMALL_CASES = {"case14", "case30", "case57", "case89pegase"}
+
+
+def _time_limit_for_case(case_folder: str, default_tl: int) -> int:
     """
-    Compose a compact but comprehensive set of combinations to exercise
-    all developed ML modules with reasonable coverage.
+    Per the paper: 60s for small cases (14, 30, 57, 89pegase), 600s for larger.
+    If a user explicitly overrides --time-limit, use that instead.
     """
-    TL = args.time_limit
+    tag = case_folder.strip("/").split("/")[-1].lower()
+    if tag in _SMALL_CASES:
+        return 60
+    return 600
+
+
+def _auto_mode_list(args: argparse.Namespace, case_folder: str = "") -> List[RunConfig]:
+    """
+    Systematic factorial experiment design.
+
+    Three orthogonal axes:
+      1. Constraint management: EXPLICIT | PRUNE-τ | LPSCREEN-τ | LAZY | LAZY+BANDIT
+      2. Search guidance:       none | WARM | WARM+HINTS | WARM+COMMIT | WARM+GRU
+      3. Screening overlay:     none | GNN
+
+    We test key combinations (not full factorial — would be ~200 runs per instance).
+    """
+    TL = _time_limit_for_case(case_folder, args.time_limit)
     MG = args.mip_gap
     Kcands = args.adv_topk_candidates or [64, 128, 256]
+    taus = args.taus or [0.1, 0.2, 0.3, 0.5, 0.8]
     modes: List[RunConfig] = []
 
-    # Baselines and explicit-screening variants
+    # ── Group 1: Baselines (no constraint reduction) ──
+    # RAW = full explicit N-1, no ML
     modes.append(RunConfig(mode="RAW", time_limit=TL, mip_gap=MG))
-    modes.append(
-        RunConfig(mode="RAW", time_limit=TL, mip_gap=MG, use_gnn_screen=True)
-    )  # RAW+GNN
-    modes.append(
-        RunConfig(
-            mode="RAW",
-            time_limit=TL,
-            mip_gap=MG,
-            use_commit_hints=True,
-            commit_on_raw=True,
-        )
-    )  # RAW+COMMIT
+    # RAW + ML search guidance (no constraint reduction)
+    modes.append(RunConfig(mode="RAW", time_limit=TL, mip_gap=MG,
+                           use_commit_hints=True, commit_on_raw=True))  # RAW+COMMIT
+    modes.append(RunConfig(mode="RAW", time_limit=TL, mip_gap=MG,
+                           use_gnn_screen=True))  # RAW+GNN
 
-    # Warm start family (no constraints screening)
+    # ── Group 2: Warm start only (no constraint reduction) ──
     modes.append(RunConfig(mode="WARM", time_limit=TL, mip_gap=MG))
     modes.append(RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG))
-    modes.append(
-        RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG, use_gru_warm=True)
-    )  # +GRU
-    modes.append(
-        RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG, use_commit_hints=True)
-    )  # +COMMIT
-    modes.append(
-        RunConfig(
-            mode="WARM+HINTS",
-            time_limit=TL,
-            mip_gap=MG,
-            use_commit_hints=True,
-            use_gru_warm=True,
-        )
-    )  # +COMMIT+GRU
+    modes.append(RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG,
+                           use_commit_hints=True))  # +COMMIT
+    modes.append(RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG,
+                           use_gru_warm=True))  # +GRU
+    modes.append(RunConfig(mode="WARM+HINTS", time_limit=TL, mip_gap=MG,
+                           use_commit_hints=True, use_gru_warm=True))  # +COMMIT+GRU
 
-    # Lazy N-1
-    modes.append(
-        RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=0)
-    )  # all violated
-    modes.append(
-        RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=128)
-    )  # K128
-    modes.append(
-        RunConfig(
-            mode="WARM+LAZY",
-            time_limit=TL,
-            mip_gap=MG,
-            use_adaptive_topk=True,
-            topk_candidates=Kcands,
-            topk_epsilon=args.adv_topk_epsilon,
-        )
-    )  # bandit
-    modes.append(
-        RunConfig(
-            mode="WARM+LAZY",
-            time_limit=TL,
-            mip_gap=MG,
-            lazy_top_k=0,
-            use_commit_hints=True,
-        )
-    )  # LAZY+COMMIT
-    modes.append(
-        RunConfig(
-            mode="WARM+LAZY", time_limit=TL, mip_gap=MG, lazy_top_k=0, use_gru_warm=True
-        )
-    )  # LAZY+GRU
+    # ── Group 3: Lazy N-1 enforcement ──
+    modes.append(RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG,
+                           lazy_top_k=0,
+                           lazy_lodf_tol=float(args.lazy_lodf_tol),
+                           lazy_isf_tol=float(args.lazy_isf_tol),
+                           lazy_viol_tol=float(args.lazy_viol_tol)))  # WARM+LAZY
+    modes.append(RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG,
+                           use_adaptive_topk=True, topk_candidates=Kcands,
+                           topk_epsilon=args.adv_topk_epsilon,
+                           lazy_lodf_tol=float(args.lazy_lodf_tol),
+                           lazy_isf_tol=float(args.lazy_isf_tol),
+                           lazy_viol_tol=float(args.lazy_viol_tol)))  # +BANDIT
+    modes.append(RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG,
+                           lazy_top_k=0, use_commit_hints=True,
+                           lazy_lodf_tol=float(args.lazy_lodf_tol),
+                           lazy_isf_tol=float(args.lazy_isf_tol),
+                           lazy_viol_tol=float(args.lazy_viol_tol)))  # +COMMIT
+    modes.append(RunConfig(mode="WARM+LAZY", time_limit=TL, mip_gap=MG,
+                           lazy_top_k=0, use_gru_warm=True,
+                           lazy_lodf_tol=float(args.lazy_lodf_tol),
+                           lazy_isf_tol=float(args.lazy_isf_tol),
+                           lazy_viol_tol=float(args.lazy_viol_tol)))  # +GRU
 
-    # Screening/PRUNE (kNN) with tau sweep, with and without GNN
-    for tau in args.taus or [0.3, 0.5, 0.7]:
-        modes.append(
-            RunConfig(mode="WARM+PRUNE", tau=float(tau), time_limit=TL, mip_gap=MG)
-        )
-        modes.append(
-            RunConfig(
-                mode="WARM+PRUNE",
-                tau=float(tau),
-                time_limit=TL,
-                mip_gap=MG,
-                use_gnn_screen=True,
-            )
-        )  # PRUNE+GNN
+    # ── Group 4: kNN constraint screening (PRUNE) ──
+    for tau in taus:
+        modes.append(RunConfig(mode="WARM+PRUNE", tau=float(tau),
+                               time_limit=TL, mip_gap=MG))
+        modes.append(RunConfig(mode="WARM+PRUNE", tau=float(tau),
+                               time_limit=TL, mip_gap=MG,
+                               use_gnn_screen=True))  # +GNN
+
+    # ── Group 5: LP Relaxation screening (LPSCREEN) — novel, no training data ──
+    for tau in taus:
+        modes.append(RunConfig(mode="WARM+LPSCREEN", tau=float(tau),
+                               time_limit=TL, mip_gap=MG))
+        modes.append(RunConfig(mode="WARM+LPSCREEN+LAZY", tau=float(tau),
+                               time_limit=TL, mip_gap=MG,
+                               lazy_top_k=0,
+                               lazy_lodf_tol=float(args.lazy_lodf_tol),
+                               lazy_isf_tol=float(args.lazy_isf_tol),
+                               lazy_viol_tol=float(args.lazy_viol_tol)))
+
+    for tau in taus:
+        modes.append(RunConfig(mode="WARM+PRUNE+LAZY", tau=float(tau),
+                               time_limit=TL, mip_gap=MG,
+                               lazy_top_k=0,
+                               lazy_lodf_tol=float(args.lazy_lodf_tol),
+                               lazy_isf_tol=float(args.lazy_isf_tol),
+                               lazy_viol_tol=float(args.lazy_viol_tol)))
+
+    modes.append(RunConfig(mode="WARM+SR+LAZY",
+                           time_limit=TL, mip_gap=MG,
+                           lazy_top_k=0,
+                           lazy_lodf_tol=float(args.lazy_lodf_tol),
+                           lazy_isf_tol=float(args.lazy_isf_tol),
+                           lazy_viol_tol=float(args.lazy_viol_tol),
+                           sr_sigma=float(args.sr_sigma),
+                           sr_l2_thr=float(args.sr_l2_thr),
+                           sr_sigma_thr=float(args.sr_sigma_thr)))
 
     return modes
 
@@ -908,6 +1272,11 @@ def main():
         "--cases",
         nargs="*",
         default=[
+            "matpower/case14",
+            "matpower/case30",
+            "matpower/case57",
+            "matpower/case89pegase",
+            "matpower/case118",
             "matpower/case300",
         ],
         help="Case folders",
@@ -937,7 +1306,17 @@ def main():
     ap.add_argument(
         "--modes",
         nargs="*",
-        default=["RAW", "WARM", "WARM+HINTS", "WARM+LAZY", "WARM+PRUNE"],
+        default=[
+            "RAW",
+            "WARM",
+            "WARM+HINTS",
+            "WARM+LAZY",
+            "WARM+PRUNE",
+            "WARM+LPSCREEN",
+            "WARM+PRUNE+LAZY",
+            "WARM+LPSCREEN+LAZY",
+            "WARM+SR+LAZY",
+        ],
         help="Which modes to run",
     )
     ap.add_argument(
@@ -945,7 +1324,7 @@ def main():
         nargs="*",
         type=float,
         default=[0.1, 0.2, 0.3, 0.5, 0.8],
-        help="Tau sweep for WARM+PRUNE",
+        help="Tau sweep for PRUNE/LPSCREEN families (including lazy hybrids)",
     )
     ap.add_argument(
         "--lazy-top-k",
@@ -956,17 +1335,35 @@ def main():
     ap.add_argument(
         "--lazy-viol-tol",
         type=float,
-        default=10,
+        default=1e-6,
         help="Lazy: violation tolerance [MW]",
     )
     ap.add_argument(
         "--lazy-lodf-tol",
         type=float,
-        default=10,
+        default=1e-4,
         help="Lazy: |LODF| ignore threshold",
     )
     ap.add_argument(
         "--lazy-isf-tol", type=float, default=1e-8, help="Lazy: |ISF| ignore threshold"
+    )
+    ap.add_argument(
+        "--sr-sigma",
+        type=float,
+        default=0.3,
+        help="SR+LAZY: sigma parameter for scenario radii",
+    )
+    ap.add_argument(
+        "--sr-l2-thr",
+        type=float,
+        default=400.0,
+        help="SR+LAZY: L2 radius threshold for explicit monitored lines",
+    )
+    ap.add_argument(
+        "--sr-sigma-thr",
+        type=float,
+        default=5.0,
+        help="SR+LAZY: sigma radius threshold for explicit monitored lines",
     )
     ap.add_argument(
         "--rc-max-items",
@@ -1108,7 +1505,6 @@ def main():
         args.adv_gru_warm = True
         args.adv_gnn_screen = True
         args.adv_adaptive_topk = True
-        auto_modes = _auto_mode_list(args)
 
     # Resolve TRAIN strategy selection
     resolve_train = True
@@ -1161,11 +1557,13 @@ def main():
                 for nm in tqdm(
                     train_to_run, desc=f"{case_folder} TRAIN RAW", unit="inst"
                 ):
+                    case_tl = _time_limit_for_case(case_folder, args.time_limit) if auto_mode else args.time_limit
                     cfg = RunConfig(
                         mode="RAW",
-                        time_limit=args.time_limit,
+                        time_limit=case_tl,
                         mip_gap=args.mip_gap,
                         save_human_logs=False,
+                        save_json_to_canonical_output=True,
                         lazy_top_k=args.lazy_top_k,
                         lazy_lodf_tol=args.lazy_lodf_tol,
                         lazy_isf_tol=args.lazy_isf_tol,
@@ -1193,8 +1591,8 @@ def main():
         # Stage B2: Redundancy index if PRUNE present
         mode_list_for_case: List[RunConfig] = []
         if auto_mode:
-            mode_list_for_case = auto_modes
-            prune_requested = any(m.mode == "WARM+PRUNE" for m in mode_list_for_case)
+            mode_list_for_case = _auto_mode_list(args, case_folder=case_folder)
+            prune_requested = any(m.mode.startswith("WARM+PRUNE") for m in mode_list_for_case)
         else:
             # Manual modes list
             prune_requested = any(
@@ -1285,6 +1683,75 @@ def main():
                                 save_human_logs=args.save_human_logs,
                             )
                         )
+                elif m_up == "WARM+LPSCREEN":
+                    for tau in args.taus:
+                        mode_list_for_case.append(
+                            RunConfig(
+                                mode="WARM+LPSCREEN",
+                                tau=float(tau),
+                                time_limit=args.time_limit,
+                                mip_gap=args.mip_gap,
+                                save_human_logs=args.save_human_logs,
+                            )
+                        )
+                elif m_up == "WARM+PRUNE+LAZY":
+                    for tau in args.taus:
+                        mode_list_for_case.append(
+                            RunConfig(
+                                mode="WARM+PRUNE+LAZY",
+                                tau=float(tau),
+                                time_limit=args.time_limit,
+                                mip_gap=args.mip_gap,
+                                lazy_top_k=args.lazy_top_k,
+                                lazy_lodf_tol=args.lazy_lodf_tol,
+                                lazy_isf_tol=args.lazy_isf_tol,
+                                lazy_viol_tol=args.lazy_viol_tol,
+                                use_commit_hints=bool(args.adv_commit_hints),
+                                commit_mode=str(args.adv_commit_mode),
+                                commit_thr=float(args.adv_commit_thr),
+                                use_gru_warm=bool(args.adv_gru_warm),
+                                save_human_logs=args.save_human_logs,
+                            )
+                        )
+                elif m_up == "WARM+LPSCREEN+LAZY":
+                    for tau in args.taus:
+                        mode_list_for_case.append(
+                            RunConfig(
+                                mode="WARM+LPSCREEN+LAZY",
+                                tau=float(tau),
+                                time_limit=args.time_limit,
+                                mip_gap=args.mip_gap,
+                                lazy_top_k=args.lazy_top_k,
+                                lazy_lodf_tol=args.lazy_lodf_tol,
+                                lazy_isf_tol=args.lazy_isf_tol,
+                                lazy_viol_tol=args.lazy_viol_tol,
+                                use_commit_hints=bool(args.adv_commit_hints),
+                                commit_mode=str(args.adv_commit_mode),
+                                commit_thr=float(args.adv_commit_thr),
+                                use_gru_warm=bool(args.adv_gru_warm),
+                                save_human_logs=args.save_human_logs,
+                            )
+                        )
+                elif m_up == "WARM+SR+LAZY":
+                    mode_list_for_case.append(
+                        RunConfig(
+                            mode="WARM+SR+LAZY",
+                            time_limit=args.time_limit,
+                            mip_gap=args.mip_gap,
+                            lazy_top_k=args.lazy_top_k,
+                            lazy_lodf_tol=args.lazy_lodf_tol,
+                            lazy_isf_tol=args.lazy_isf_tol,
+                            lazy_viol_tol=args.lazy_viol_tol,
+                            use_commit_hints=bool(args.adv_commit_hints),
+                            commit_mode=str(args.adv_commit_mode),
+                            commit_thr=float(args.adv_commit_thr),
+                            use_gru_warm=bool(args.adv_gru_warm),
+                            sr_sigma=float(args.sr_sigma),
+                            sr_l2_thr=float(args.sr_l2_thr),
+                            sr_sigma_thr=float(args.sr_sigma_thr),
+                            save_human_logs=args.save_human_logs,
+                        )
+                    )
                 else:
                     tqdm.write(f"Unknown mode '{m}' - ignored")
 
@@ -1314,6 +1781,9 @@ def main():
                 rc = None
 
         # Stage B3: Pretrain extra ML modules if needed
+        # Use train split names to avoid data leakage from test/val outputs
+        train_names_set = set(train)
+
         if auto_mode:
             any_commit = any(
                 cfg.use_commit_hints or (cfg.mode == "RAW" and cfg.commit_on_raw)
@@ -1324,7 +1794,7 @@ def main():
             if any_commit:
                 try:
                     ch = CommitmentHints(case_folder=case_folder)
-                    ch.pretrain(force=True)
+                    ch.pretrain(force=True, restrict_to_names=train_names_set)
                     _ = ch.ensure_trained()
                     tqdm.write(f"[{case_folder}] Commitment hints model prepared.")
                 except Exception:
@@ -1332,31 +1802,41 @@ def main():
                         f"[{case_folder}] Commitment hints pretrain failed or skipped."
                     )
             if any_gnn:
-                try:
-                    gnn = GNNLineScreener(case_folder=case_folder)
-                    gnn.pretrain(force=True)
-                    _ = gnn.ensure_trained()
-                    tqdm.write(f"[{case_folder}] GNN screening model prepared.")
-                except Exception:
+                if GNNLineScreener is None:
                     tqdm.write(
-                        f"[{case_folder}] GNN screening pretrain failed or skipped."
+                        f"[{case_folder}] GNN screening skipped (torch/gnn deps unavailable)."
                     )
+                else:
+                    try:
+                        gnn = GNNLineScreener(case_folder=case_folder)
+                        gnn.pretrain(force=True, restrict_to_names=train_names_set)
+                        _ = gnn.ensure_trained()
+                        tqdm.write(f"[{case_folder}] GNN screening model prepared.")
+                    except Exception:
+                        tqdm.write(
+                            f"[{case_folder}] GNN screening pretrain failed or skipped."
+                        )
             if any_gru:
-                try:
-                    gw = GRUDispatchWarmStart(case_folder=case_folder)
-                    gw.pretrain(force=True)
-                    _ = gw.ensure_trained()
-                    tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
-                except Exception:
+                if GRUDispatchWarmStart is None:
                     tqdm.write(
-                        f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                        f"[{case_folder}] GRU warm-start skipped (torch deps unavailable)."
                     )
+                else:
+                    try:
+                        gw = GRUDispatchWarmStart(case_folder=case_folder)
+                        gw.pretrain(force=True, restrict_to_names=train_names_set)
+                        _ = gw.ensure_trained()
+                        tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
+                    except Exception:
+                        tqdm.write(
+                            f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                        )
         else:
             # Manual flags drive pretraining (backward-compatible)
             if bool(args.adv_commit_hints) or bool(args.adv_commit_on_raw):
                 try:
                     ch = CommitmentHints(case_folder=case_folder)
-                    ch.pretrain(force=True)
+                    ch.pretrain(force=True, restrict_to_names=train_names_set)
                     _ = ch.ensure_trained()
                     tqdm.write(f"[{case_folder}] Commitment hints model prepared.")
                 except Exception:
@@ -1364,25 +1844,35 @@ def main():
                         f"[{case_folder}] Commitment hints pretrain failed or skipped."
                     )
             if bool(args.adv_gnn_screen):
-                try:
-                    gnn = GNNLineScreener(case_folder=case_folder)
-                    gnn.pretrain(force=True)
-                    _ = gnn.ensure_trained()
-                    tqdm.write(f"[{case_folder}] GNN screening model prepared.")
-                except Exception:
+                if GNNLineScreener is None:
                     tqdm.write(
-                        f"[{case_folder}] GNN screening pretrain failed or skipped."
+                        f"[{case_folder}] GNN screening skipped (torch/gnn deps unavailable)."
                     )
+                else:
+                    try:
+                        gnn = GNNLineScreener(case_folder=case_folder)
+                        gnn.pretrain(force=True, restrict_to_names=train_names_set)
+                        _ = gnn.ensure_trained()
+                        tqdm.write(f"[{case_folder}] GNN screening model prepared.")
+                    except Exception:
+                        tqdm.write(
+                            f"[{case_folder}] GNN screening pretrain failed or skipped."
+                        )
             if bool(args.adv_gru_warm):
-                try:
-                    gw = GRUDispatchWarmStart(case_folder=case_folder)
-                    gw.pretrain(force=True)
-                    _ = gw.ensure_trained()
-                    tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
-                except Exception:
+                if GRUDispatchWarmStart is None:
                     tqdm.write(
-                        f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                        f"[{case_folder}] GRU warm-start skipped (torch deps unavailable)."
                     )
+                else:
+                    try:
+                        gw = GRUDispatchWarmStart(case_folder=case_folder)
+                        gw.pretrain(force=True, restrict_to_names=train_names_set)
+                        _ = gw.ensure_trained()
+                        tqdm.write(f"[{case_folder}] GRU warm-start model prepared.")
+                    except Exception:
+                        tqdm.write(
+                            f"[{case_folder}] GRU warm-start pretrain failed or skipped."
+                        )
 
         # Stage C: Run TEST across modes
         log_path = _prepare_csv_log(case_folder)
@@ -1405,16 +1895,6 @@ def main():
                             f"  {nm} | {mode_label:>18} | SKIPPED (pair present in skip logs)"
                         )
                         continue
-
-                # Ensure solver tolerances for lazy match CLI defaults if not set
-                if (
-                    cfg.mode == "WARM+LAZY"
-                    and cfg.lazy_lodf_tol == 1e-4
-                    and cfg.lazy_isf_tol == 1e-8
-                ):
-                    cfg.lazy_lodf_tol = args.lazy_lodf_tol
-                    cfg.lazy_isf_tol = args.lazy_isf_tol
-                    cfg.lazy_viol_tol = args.lazy_viol_tol
                 row = solve_one(
                     nm, cfg, wsp=wsp, rc=rc, use_train_db_for_rc=True, args=args
                 )

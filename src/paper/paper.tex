@@ -495,34 +495,10 @@ To accelerate the discovery of the first feasible solution, the MILP solver is w
 
 \begin{table*}[t]
 \centering
-\caption{Optimal case results for all modes}
+\caption{Per-case status shares by mode (optimal / infeasible / other termination, \%).}
 \label{tab:optimal_cases}
-\renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|X|X|}
-\hline
-\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
-RAW+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 98/0/2 & 71/0/29 \\ \hline
-RAW+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 71/0/29 \\ \hline
-WARM & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+HINTS & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 80/0/20 \\ \hline
-WARM+HINTS+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 80/0/20 \\ \hline
-WARM+HINTS+COMMIT+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+HINTS+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+LAZY & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+BANDIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.10 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.10+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.20 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.20+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.30 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.30+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.50 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.50+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.80 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 93/0/7 \\ \hline
-WARM+PRUNE-0.80+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 92/0/8 \\ \hline
-\end{tabularx}
+\renewcommand{\arraystretch}{1.1}
+\IfFileExists{results/tables/optimality_by_case.tex}{\input{results/tables/optimality_by_case.tex}}{\input{../../results/tables/optimality_by_case.tex}}
 \end{table*}
 
 A more granular warm start for generator dispatch profiles is generated using a Gated Recurrent Unit (GRU) network. A two-layer GRU is trained with Mean Squared Error (MSE) loss to predict the fraction of available headroom used by each generator at each hour. This provides a coherent dispatch trajectory that can be used to initialize the power segment variables. This optional dispatch warm start is labeled as GRU.
@@ -536,67 +512,38 @@ A more advanced method uses a dedicated classifier, such as a Gradient Boosted D
 
 \begin{table*}[t]
 \centering
-\caption{Speed-up factors across cases and modes.}
+\caption{Median end-to-end speedup factors across cases and modes.}
 \label{tab:speedup}
-\renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|X|X|}
-\hline
-\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
-RAW+COMMIT & 1.07x & 1.03x & 1.05x & 1.09x & 1.02x & 1.03x \\ \hline
-RAW+GNN & 1.05x & 1.02x & 1.03x & 1.09x & 1.01x & 1.02x \\ \hline
-WARM & 1.06x & 0.98x & 1.19x & 1.43x & 1.02x & 1.18x \\ \hline
-WARM+HINTS & 1.07x & 0.96x & 1.19x & 1.41x & 1.01x & 1.17x \\ \hline
-WARM+HINTS+COMMIT & 1.07x & 0.94x & 1.21x & 1.43x & 1.01x & 1.18x \\ \hline
-WARM+HINTS+COMMIT+GRU & 0.85x & 0.92x & 1.02x & 1.08x & 1.02x & 1.17x \\ \hline
-WARM+HINTS+GRU & 0.87x & 0.93x & 0.99x & 1.07x & 1.01x & 1.16x \\ \hline
-WARM+LAZY & 1.65x & \textbf{1.84x} & 6.25x & 12.77x & 8.97x & \textbf{13.14x} \\ \hline
-WARM+LAZY+BANDIT & \textbf{1.77x} & 1.84x & \textbf{6.30x} & 12.82x & \textbf{9.00x} & 13.11x \\ \hline
-WARM+LAZY+COMMIT & 1.76x & 1.84x & 6.27x & 12.80x & 8.86x & 13.08x \\ \hline
-WARM+LAZY+GRU & 1.45x & 1.62x & 5.03x & 12.45x & 8.95x & 13.09x \\ \hline
-WARM+PRUNE-0.10 & 1.35x & 1.41x & 5.84x & \textbf{25.83x} & 8.11x & 8.81x \\ \hline
-WARM+PRUNE-0.10+GNN & 1.28x & 1.41x & 5.75x & 25.75x & 8.06x & 8.81x \\ \hline
-WARM+PRUNE-0.20 & 1.30x & 1.40x & 5.73x & 21.51x & 7.95x & 8.12x \\ \hline
-WARM+PRUNE-0.20+GNN & 1.33x & 1.46x & 5.86x & 21.18x & 7.92x & 8.11x \\ \hline
-WARM+PRUNE-0.30 & 1.34x & 1.41x & 5.84x & 16.22x & 7.29x & 6.09x \\ \hline
-WARM+PRUNE-0.30+GNN & 1.34x & 1.42x & 5.73x & 16.18x & 7.21x & 6.02x \\ \hline
-WARM+PRUNE-0.50 & 1.27x & 1.44x & 5.64x & 3.92x & 3.06x & 3.37x \\ \hline
-WARM+PRUNE-0.50+GNN & 1.31x & 1.43x & 5.68x & 3.92x & 3.05x & 3.41x \\ \hline
-WARM+PRUNE-0.80 & 1.30x & 1.44x & 4.82x & 2.43x & 1.04x & 1.64x \\ \hline
-WARM+PRUNE-0.80+GNN & 1.29x & 1.45x & 4.76x & 2.42x & 1.05x & 1.63x \\ \hline
-\end{tabularx}
+\renewcommand{\arraystretch}{1.1}
+\IfFileExists{results/tables/speedup_by_case.tex}{\input{results/tables/speedup_by_case.tex}}{\input{../../results/tables/speedup_by_case.tex}}
 \end{table*}
 
 All computational experiments were conducted using the Gurobi 12.1 solver on a machine equipped with an AMD Ryzen 7840HS processor and 32 GB of RAM. The benchmark suite consisted of six MATPOWER cases from the UnitCommitment.jl repository, which were used to formulate a multi-period DC-SCUC with full N-1 security constraints (cases 14, 57, 89pegase, 118 and 300).
 
-For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing, respectively. Only the test split was used for all reported results. The speedups were measured relative to a baseline RAW mode, which represented a complete MILP optimization solved without any acceleration techniques. The performance of different methods was analyzed using the empirical cumulative distribution function (ECDF) of the per-instance speedups.
+For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing, respectively. Only the test split was used for the reported benchmark summaries. Speedups are measured relative to the RAW baseline, which corresponds to solving the full MILP without ML guidance or contingency-set reduction.
 
-A total of 7,702 solver runs were performed across 25 different acceleration modes on a final test set of 327 unique problem instances. The total runtime for all experiments was 73.5 hours. Of these runs, 93.9\% finished with an optimal solution, 4.2\% were infeasible, and 1.9\% terminated due to the time limit.
+All publication-facing summaries are generated directly from the experiment logs under \texttt{results/raw\_logs}. The benchmark pipeline reports end-to-end wall-clock time rather than solver-only runtime, so warm-start construction, screening, optimization, and post-solve verification are all included in the published timing statistics.
 
-At the instance level, 95.7\% of the unique instances were solved optimally at least once by one of the tested modes. The time limit for smaller cases (case 14 - case 89 pegase) was set at 60 seconds, while for larger cases, it was set at 600 seconds. In addition, the training and validation sets of instances were solved over a period of approximately one week.
-
-The robustness of each method is detailed in Tab.~\ref{tab:optimal_cases}. This table reports the percentage of instances that were solved optimally, found to be infeasible, or timed out. All variants using lazy enforcement or constraint pruning achieve perfect or near-perfect optimality rates across all test cases.
-In contrast, the baseline methods are less robust on larger systems. For example, the RAW+COMMIT variant only solves 71\% of case300 instances optimally within the given time limit, compared to the perfect or near-perfect rates achieved by other methods. It is also worth noting that the RAW baseline occasionally finds infeasible solutions for case 57, as confirmed by other methods. In addition, the least aggressive pruning strategy (identifying redundant constraints) sometimes fails to find an optimal solution for case 300, as shown in the table. This suggests that overly aggressive pruning may remove correct constraints. Also warm start methods and branching hints may provide start solutions which leads to time limit solver aborting. 
+The robustness of each method is summarized in Tab.~\ref{tab:optimal_cases}, which reports the percentage of instances that finished with an optimal solution, were declared infeasible, or terminated for another reason. Tab.~\ref{tab:speedup} reports the corresponding median speedup against RAW on a per-case basis. In the current pipeline, the largest gains are obtained by methods that either delay contingency enforcement (LAZY variants) or reduce the explicit contingency set before the solve (PRUNE variants), while warm starts and branching hints alone provide smaller improvements.
 
 \begin{figure}
     \centering
-    \includegraphics[width=0.5\textwidth]{plots/Speedup_general.png}
-    \caption{Aggregate speedup distribution across all test cases.}
+    \IfFileExists{results/figures/bar_speed_ratio_by_mode.png}{\includegraphics[width=0.5\textwidth]{results/figures/bar_speed_ratio_by_mode.png}}{\includegraphics[width=0.5\textwidth]{../../results/figures/bar_speed_ratio_by_mode.png}}
+    \caption{Mean end-to-end runtime ratio relative to RAW across modes (lower is better).}
     \label{fig:Speedup_general}
 \end{figure}
 
-The speedup factors relative to the RAW baseline are summarized in Tab.~\ref{tab:speedup} and Fig.~\ref{fig:Speedup_general}. The best result for each case is highlighted in bold. The strongest average accelerations are delivered by the constraint pruning methods with a high (more aggressive) threshold. The WARM+PRUNE-0.10 configuration achieves the highest average speedup of 8.56x. Among the lazy enforcement strategies, WARM+LAZY+BANDIT is the most effective, attaining an average speedup of 7.47x. The results show that the best method can be case-dependent; pruning excels on case89pegase (up to 25.83x), while lazy enforcement dominates the largest instance, case300 (up to 13.14x). Conversely, methods that rely only on warm starts and hints without effective constraint management offer little to no acceleration, underscoring that managing the complexity of N-1 security is the primary driver of performance.
+The aggregate runtime ratios relative to RAW are summarized in Tab.~\ref{tab:speedup} and Fig.~\ref{fig:Speedup_general}. Because these artifacts are generated from the current log set, they can be refreshed automatically after any new benchmark campaign instead of being transcribed into the manuscript by hand.
 
-The ECDF plot in Fig.~\ref{fig:ecdf}, which contains the most effective methods, illustrates these patterns. High-threshold pruning (PRUNE-0.10) provides consistent gains across the majority of instances. In contrast, the lazy enforcement methods, particularly the adaptive bandit variant, achieve the largest speedups on the most difficult instances, with many runs exceeding a 10x speedup.
-
-These trends are confirmed by the wall-clock runtime statistics in Tab.~\ref{tab:runtime}. For case118, the median time dropped from 43.40 seconds (RAW) to 4.84 seconds with LAZY+BANDIT. For the largest case, case300, the median runtime improved from 189.90 seconds to just 15 seconds with the same lazy method. Across several cases, we observed an interesting outcome: moderately aggressive pruning can solve instances that the RAW baseline fails on within the time limit. This is because the significantly reduced problem size allows the solver to explore the search tree more effectively and find a feasible integer solution faster. This highlights a complex trade-off between the initial model size and the solver's search efficiency.
+Figure~\ref{fig:ecdf} complements these aggregates with per-case runtime CDFs for RAW and WARM+LAZY. Tab.~\ref{tab:runtime} reports representative median end-to-end runtimes and confidence intervals for selected methods. Together, these artifacts show the same core trend: reducing the explicit contingency burden is the dominant source of acceleration, especially on the larger test systems.
 
 
 
 
 \begin{figure*}
     \centering
-    \includegraphics[width=0.8\linewidth]{plots/ecdf.png}
-    \caption{Caption}
+    \IfFileExists{results/figures/runtime_cdf_grid.png}{\includegraphics[width=0.8\linewidth]{results/figures/runtime_cdf_grid.png}}{\includegraphics[width=0.8\linewidth]{../../results/figures/runtime_cdf_grid.png}}
+    \caption{Per-case runtime CDFs comparing RAW and WARM+LAZY.}
     \label{fig:ecdf}
 \end{figure*}
 
@@ -607,31 +554,20 @@ These trends are confirmed by the wall-clock runtime statistics in Tab.~\ref{tab
 
 \begin{table*}[t]
 \centering
-\caption{Global runtime statistics (median [min--max])}
+\caption{Selected end-to-end runtime statistics (median [95\% CI]).}
 \label{tab:runtime}
-\renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|}
-\hline
-\textbf{Case} & \textbf{RAW} & \textbf{WARM+LAZY+BANDIT} & \textbf{WARM+PRUNE-0.10} & \textbf{OTHER} \\ \hline \hline
-case14 & 0.08 [0.06 - 0.13] & 0.05 [0.03 - 0.07] & 0.06 [0.04 - 0.11] & 0.07 [0.03 - 0.17] \\ \hline
-case30 & 0.15 [0.12 - 0.22] & 0.08 [0.06 - 0.17] & 0.11 [0.06 - 0.19] & 0.12 [0.06 - 0.26] \\ \hline
-case57 & 0.65 [0.54 - 0.77] & 0.11 [0.08 - 0.20] & 0.12 [0.08 - 0.22] & 0.29 [0.07 - 0.91] \\ \hline
-case89pegase & 12.31 [9.19 - 16.84] & 0.97 [0.75 - 1.37] & 0.49 [0.33 - 0.84] & 4.90 [0.35 - 16.24] \\ \hline
-case118 & 43.40 [25.79 - 66.25] & 4.84 [3.74 - 7.67] & 5.69 [3.27 - 20.86] & 23.96 [3.12 - 96.22] \\ \hline
-case300 & 189.90 [135.81 - 393.03] & 15.00 [11.32 - 20.48] & 22.12 [13.17 - 33.90] & 92.45 [11.26 - 397.51] \\ \hline
-\end{tabularx}
+\renewcommand{\arraystretch}{1.1}
+\IfFileExists{results/tables/runtime_selected.tex}{\input{results/tables/runtime_selected.tex}}{\input{../../results/tables/runtime_selected.tex}}
 \end{table*}
 
 
 \section{Conclusion}
 
-This study demonstrates that the most effective method for accelerating a raw mixed-integer linear programming (MILP) formulation of the security-constrained unit commitment (SCUC) problem is to reduce or delay post-contingency constraints while maintaining exact feasibility checks. Across 327 instances of the MATPOWER cases (7702 runs), solved using Gurobi 12.1 on a Ryzen 7840HS/32GB system, two strategies showed the largest and most consistent improvements.The first one is screening redundant contingencies prior to solving the model using simple data-driven predictors and local and probabilistic time-dependent factors (LODF/PTDF) sensitivities. The second, generating only the necessary contingency constraints on demand during the branching process.
+This study demonstrates that the most effective way to accelerate a raw mixed-integer linear programming (MILP) formulation of the security-constrained unit commitment (SCUC) problem is to reduce or delay post-contingency constraints while preserving exact feasibility checks. Across the benchmark suite considered here, two strategies consistently provide the largest gains: screening redundant contingencies before the solve using data-driven predictors and PTDF/LODF sensitivities, and generating only the necessary contingency constraints on demand during branch-and-cut.
 
-Conservative screening thresholds preserved optimality in all instances, and lazy generation with an adaptive cut budget often achieved the best performance per instance. In aggregate, the strongest screening thresholds produced the highest average speedup (approximately 8.6x over a fully explicit baseline), while demand-based generation dominated the number of wins across instances.
+Conservative screening thresholds and lazy generation preserve robustness while substantially reducing end-to-end runtime on the larger systems. By contrast, learning signals applied only to the discrete search, such as warm starts and branching hints, provide smaller average gains but still help stabilize the search and improve the quality of early incumbents. These mechanisms can be combined effectively, suggesting a constraint-economy-first design: shrink or postpone the contingency set, verify security exactly, and then add inexpensive learning cues to guide the solver.
 
-Learning signals applied to the discrete search, including warm starts from historical solutions, lightweight initializers, and branching guidance based on commitment probability, yielded smaller average speedups (around 1.1x) but consistently improved the time to first incumbent and stabilized the search process. These issues can be safely combined with either screening or lazy generation, suggesting a "constraint-economy first" design: shrinking or postponing the contingency set, verifying security with exact checks, and adding inexpensive learning cues to guide the search.
-
-Future work will focus on adapting screening thresholds online, coupling screening with lazy generation in a unified policy, and developing reliability-aware predictors with formal guarantees..
+Future work will focus on adapting screening thresholds online, coupling screening with lazy generation in a unified policy, and developing reliability-aware predictors with stronger guarantees.
 
 
 
@@ -682,5 +618,3 @@ A.~S. Xavier, A.~M. Kazachkov, O.~Yurdakul, J.~He, and F.~Qiu, ``UnitCommitment.
 
 
 \end{document}
-
-

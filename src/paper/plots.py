@@ -43,9 +43,13 @@ Outputs (.pdf and .png) under results/figures:
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import matplotlib
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 FIG_DIR = Path("results") / "figures"
@@ -56,6 +60,7 @@ SUMMARY_EXT = Path("results") / "summary_extended.csv"
 EFFECTS_WLZ = Path("results") / "effects_wlz_vs_raw.csv"
 FASTEST = Path("results") / "mode_fastest_share.csv"
 MODE_SPEED = Path("results") / "mode_speed_stats.csv"
+RAW_BASELINE_MODE = "RAW"
 
 # Global aesthetics
 sns.set_theme(style="whitegrid", context="paper")
@@ -73,13 +78,35 @@ def _read_csv_required(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _runtime_col(df: pd.DataFrame) -> str:
+    if "runtime_report_sec" in df.columns:
+        return "runtime_report_sec"
+    if "wall_sec" in df.columns:
+        return "wall_sec"
+    return "runtime_sec"
+
+
+def _normalize_runtime_frame(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    col = _runtime_col(out)
+    out["runtime_sec"] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
 def _parse_tau(m):
     try:
-        if isinstance(m, str) and "-" in m:
-            return float(m.split("-")[-1])
+        if isinstance(m, str):
+            mt = re.search(r"(?:PRUNE|LPSCREEN)-([0-9]+(?:\.[0-9]+)?)", m.upper())
+            if mt:
+                return float(mt.group(1))
     except Exception:
         return np.nan
     return np.nan
+
+
+def _pure_prune_mask(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    return s.str.startswith("WARM+PRUNE") & ~s.str.contains("LAZY", case=False, na=False)
 
 
 def _set_log_if_needed(ax, vals, axis="y", q_lo=0.05, q_hi=0.95, ratio_thr=10.0):
@@ -107,7 +134,7 @@ def runtime_cdfs(df: pd.DataFrame):
     # Per-case CDFs
     for case, g in df.groupby("case_folder"):
         a = (
-            g[g["mode"].str.upper().str.startswith("RAW")]["runtime_sec"]
+            g[g["mode"].str.upper() == RAW_BASELINE_MODE]["runtime_sec"]
             .dropna()
             .values
         )
@@ -124,6 +151,7 @@ def runtime_cdfs(df: pd.DataFrame):
         plt.xlabel("Runtime [s]")
         plt.ylabel("CDF")
         plt.title(f"Runtime CDF — {case}")
+        plt.title(f"Runtime CDF - {case}")
         plt.grid(alpha=0.25)
         plt.legend()
         out = FIG_DIR / f"runtime_cdf_{case.replace('/', '_')}"
@@ -149,7 +177,7 @@ def runtime_cdf_grid(df: pd.DataFrame, max_cols: int = 2):
         ax = axs[r, c]
         g = df[df["case_folder"] == case]
         a = (
-            g[g["mode"].str.upper().str.startswith("RAW")]["runtime_sec"]
+            g[g["mode"].str.upper() == RAW_BASELINE_MODE]["runtime_sec"]
             .dropna()
             .values
         )
@@ -212,6 +240,8 @@ def nodes_boxplot_ablation(df: pd.DataFrame, case_focus: str = "matpower/case118
     _set_log_if_needed(ax, g["nodes"], axis="y", ratio_thr=20.0)
     plt.title(f"Node counts — ablation — {case_focus}")
     plt.ylabel("Node count")
+    for txt in ax.texts:
+        txt.set_text("*")
     plt.xlabel("")
     out = FIG_DIR / f"nodes_boxplot_ablation_{case_focus.replace('/', '_')}"
     plt.tight_layout()
@@ -224,7 +254,7 @@ def pareto_constraints_vs_runtime(
     df: pd.DataFrame, case_focus: str = "matpower/case118"
 ):
     g = df[
-        (df["case_folder"] == case_focus) & (df["mode"].str.startswith("WARM+PRUNE"))
+        (df["case_folder"] == case_focus) & _pure_prune_mask(df["mode"])
     ].copy()
     if g.empty:
         return
@@ -233,7 +263,7 @@ def pareto_constraints_vs_runtime(
     raw_med_rt = (
         df[
             (df["case_folder"] == case_focus)
-            & (df["mode"].str.upper().str.startswith("RAW"))
+            & (df["mode"].str.upper() == RAW_BASELINE_MODE)
         ]["runtime_sec"]
         .dropna()
         .median()
@@ -241,7 +271,7 @@ def pareto_constraints_vs_runtime(
     raw_med_root = (
         df[
             (df["case_folder"] == case_focus)
-            & (df["mode"].str.upper().str.startswith("RAW"))
+            & (df["mode"].str.upper() == RAW_BASELINE_MODE)
         ]["num_constrs_root"]
         .dropna()
         .median()
@@ -297,7 +327,7 @@ def heatmap_pruned_ratio(df: pd.DataFrame, cases: list):
     all_taus = set()
     for case in cases:
         g = df[
-            (df["case_folder"] == case) & (df["mode"].str.startswith("WARM+PRUNE"))
+            (df["case_folder"] == case) & _pure_prune_mask(df["mode"])
         ].copy()
         if g.empty:
             continue
@@ -307,7 +337,7 @@ def heatmap_pruned_ratio(df: pd.DataFrame, cases: list):
         else:
             base_root = df[
                 (df["case_folder"] == case)
-                & (df["mode"].str.upper().str.startswith("RAW"))
+                & (df["mode"].str.upper() == RAW_BASELINE_MODE)
             ]["num_constrs_root"].median()
             g["ratio"] = (
                 g["num_constrs_root"] / float(base_root)
@@ -368,7 +398,7 @@ def scalability(df: pd.DataFrame):
         )
         try:
             bins = pd.qcut(g["num_constrs_root"], q=min(8, len(g)), duplicates="drop")
-            trend = g.groupby(bins)["runtime_sec"].median().reset_index()
+            trend = g.groupby(bins, observed=False)["runtime_sec"].median().reset_index()
             xs = []
             for intr in trend[bins.name]:
                 try:
@@ -497,7 +527,7 @@ def speedup_violin(pairs: pd.DataFrame):
 
 def slope_runtime(df: pd.DataFrame, case_focus: str = "matpower/case118"):
     g = df[df["case_folder"] == case_focus]
-    a = g[g["mode"].str.upper().str.startswith("RAW")][
+    a = g[g["mode"].str.upper() == RAW_BASELINE_MODE][
         ["instance_name", "runtime_sec"]
     ].rename(columns={"runtime_sec": "rt_raw"})
     b = g[g["mode"] == "WARM+LAZY"][["instance_name", "runtime_sec"]].rename(
@@ -607,11 +637,11 @@ def scatter_raw_vs_modes(df: pd.DataFrame, case_focus: str = "matpower/case300")
     Points below the diagonal indicate a speed-up over RAW.
     """
     g = df[df["case_folder"] == case_focus].copy()
-    base = g[g["mode"].str.upper().str.startswith("RAW")][
+    base = g[g["mode"].str.upper() == RAW_BASELINE_MODE][
         ["instance_name", "runtime_sec"]
     ].rename(columns={"runtime_sec": "rt_raw"})
     others = sorted(
-        [m for m in g["mode"].unique() if not str(m).upper().startswith("RAW")]
+        [m for m in g["mode"].unique() if str(m).upper() != RAW_BASELINE_MODE]
     )
     if not others:
         return
@@ -743,7 +773,7 @@ def bar_speed_ratio_by_mode(mode_speed: pd.DataFrame):
         x="mode",
         y="mean_runtime_ratio",
         color="#4c72b0",
-        ci=None,
+        errorbar=None,
     )
     # Add error bars (std)
     for i, r in d.reset_index(drop=True).iterrows():
@@ -772,8 +802,11 @@ def bar_speed_ratio_by_mode(mode_speed: pd.DataFrame):
     plt.ylabel("Mean runtime ratio vs RAW (lower is better)")
     plt.xlabel("")
     plt.title("Средний speedup по модам (ratio < 1 => быстрее)")
+    plt.title("Mean runtime ratio by mode (ratio < 1 means faster)")
     plt.xticks(rotation=20, ha="right")
     out = FIG_DIR / "bar_speed_ratio_by_mode"
+    for txt in ax.texts:
+        txt.set_text("")
     plt.tight_layout()
     plt.savefig(out.with_suffix(".pdf"))
     plt.savefig(out.with_suffix(".png"))
@@ -874,6 +907,8 @@ def box_runtime_by_group_flags(df: pd.DataFrame):
     flags = [
         "with_LAZY",
         "with_PRUNE",
+        "with_LPSCREEN",
+        "with_SR",
         "with_GNN",
         "with_COMMIT",
         "with_GRU",
@@ -902,9 +937,13 @@ def box_runtime_by_group_flags(df: pd.DataFrame):
             data=tmp,
             x="flag",
             y="runtime_sec",
+            hue="flag",
             palette=["#8ecae6", "#f4a261"],
+            dodge=False,
             ax=ax,
         )
+        if ax.legend_ is not None:
+            ax.legend_.remove()
         ax.set_title(f"Runtime by {flg}")
         ax.set_xlabel("")
         ax.set_ylabel("Runtime [s]")
@@ -928,7 +967,7 @@ def line_prune_tau_runtime_mip(df: pd.DataFrame):
     x = tau, y1 = runtime_sec (median), hue = with_GNN
     twin y-axis for mip_gap (median).
     """
-    d = df[df["mode"].str.startswith("WARM+PRUNE")].copy()
+    d = df[_pure_prune_mask(df["mode"])].copy()
     if d.empty:
         return
     d["tau"] = d["mode"].apply(_parse_tau)
@@ -1179,10 +1218,10 @@ def radar_modes_top5(df: pd.DataFrame):
     ax = plt.subplot(111, polar=True)
     for _, r in top.iterrows():
         vals = [
-            float(speed_score[grp["mode"] == r["mode"]]),
-            float(acc_score[grp["mode"] == r["mode"]]),
-            float(mem_score[grp["mode"] == r["mode"]]),
-            float(succ_score[grp["mode"] == r["mode"]]),
+            float(speed_score[grp["mode"] == r["mode"]].iloc[0]),
+            float(acc_score[grp["mode"] == r["mode"]].iloc[0]),
+            float(mem_score[grp["mode"] == r["mode"]].iloc[0]),
+            float(succ_score[grp["mode"] == r["mode"]].iloc[0]),
         ]
         vals += vals[:1]
         ax.plot(angles, vals, label=r["mode"], linewidth=2, alpha=0.85)
@@ -1191,6 +1230,7 @@ def radar_modes_top5(df: pd.DataFrame):
     ax.set_xticklabels(categories)
     ax.set_ylim(0, 1.0)
     plt.title("Top-5 modes — multi-criterion radar")
+    plt.title("Top-5 modes - multi-criterion radar")
     plt.legend(loc="upper right", bbox_to_anchor=(1.35, 1.1), fontsize=8)
     out = FIG_DIR / "radar_modes_top5"
     plt.tight_layout()
@@ -1201,7 +1241,7 @@ def radar_modes_top5(df: pd.DataFrame):
 
 def main():
     _ensure()
-    df = _read_csv_required(MERGED)
+    df = _normalize_runtime_frame(_read_csv_required(MERGED))
 
     # Core plots already present
     runtime_cdfs(df)

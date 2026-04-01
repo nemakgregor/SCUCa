@@ -47,21 +47,19 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# Optional CatBoost
 try:
     from catboost import CatBoostClassifier
 
     HAVE_CATBOOST = True
-except Exception:
+except ImportError:
     HAVE_CATBOOST = False
 
-# Fallback SKLearn
 try:
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.metrics import roc_auc_score
 
     HAVE_SKLEARN = True
-except Exception:
+except ImportError:
     HAVE_SKLEARN = False
 
 from src.data_preparation.params import DataParams
@@ -159,7 +157,7 @@ class _SimpleModelWrap:
             if not HAVE_SKLEARN:
                 raise RuntimeError("Neither CatBoost nor scikit-learn is available.")
             self.model = GradientBoostingClassifier(
-                random_state=42, n_estimators=300, learning_rate=0.06, max_depth=3
+                random_state=42, n_estimators=500, learning_rate=0.06, max_depth=6
             )
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
@@ -239,7 +237,7 @@ class CommitmentHints:
         self.model: Optional[_SimpleModelWrap] = None
         self.meta: Dict = {}
 
-    def _build_training_df(self, limit: Optional[int] = None) -> Optional[pd.DataFrame]:
+    def _build_training_df(self, limit: Optional[int] = None, restrict_to_names: Optional[set] = None) -> Optional[pd.DataFrame]:
         outs = _list_outputs(self.case)
         if not outs:
             return None
@@ -252,6 +250,8 @@ class CommitmentHints:
             if not out:
                 continue
             name = _instance_name_from_output(op)
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
             # Load scenario for static features
             try:
                 inst = read_benchmark(name, quiet=True)
@@ -268,13 +268,45 @@ class CommitmentHints:
                 sum_pmax += float(np.mean([float(x) for x in g.max_power]))
             if sum_pmax <= 0:
                 sum_pmax = 1.0
+            # Compute PTDF-derived features per generator (network-aware)
+            # ISF tells us how much each generator's bus affects each line
+            ptdf_impact = {}  # gen_name -> max |ISF_{l, bus_g}|
+            ptdf_mean = {}    # gen_name -> mean |ISF_{l, bus_g}|
+            bus_degree = {}   # gen_name -> number of lines at bus
+            try:
+                isf = sc.isf.tocsc()
+                buses = sc.buses
+                ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
+                non_ref = sorted([b.index for b in buses if b.index != ref_1b])
+                col_map = {bidx: c for c, bidx in enumerate(non_ref)}
+                # Bus degree (number of incident lines)
+                bdeg = {}
+                for ln in sc.lines:
+                    bdeg[ln.source.index] = bdeg.get(ln.source.index, 0) + 1
+                    bdeg[ln.target.index] = bdeg.get(ln.target.index, 0) + 1
+                for g in sc.thermal_units:
+                    bidx = g.bus.index
+                    bus_degree[g.name] = float(bdeg.get(bidx, 0))
+                    if bidx == ref_1b or bidx not in col_map:
+                        ptdf_impact[g.name] = 0.0
+                        ptdf_mean[g.name] = 0.0
+                    else:
+                        col = isf.getcol(col_map[bidx])
+                        vals = np.abs(col.data)
+                        ptdf_impact[g.name] = float(vals.max()) if len(vals) > 0 else 0.0
+                        ptdf_mean[g.name] = float(vals.mean()) if len(vals) > 0 else 0.0
+            except Exception:
+                for g in sc.thermal_units:
+                    ptdf_impact[g.name] = 0.0
+                    ptdf_mean[g.name] = 0.0
+                    bus_degree[g.name] = 0.0
+
             # Labels from solved output
             gens_sol = out.get("generators", {}) or {}
             for g in sc.thermal_units:
                 gsol = gens_sol.get(g.name, {})
                 u_list = gsol.get("commit", None)
                 if u_list is None:
-                    # cannot train this gen on this instance
                     continue
                 # static features normalized
                 ru = float(getattr(g, "ramp_up", 0.0)) / max(1.0, sum_pmax)
@@ -286,6 +318,10 @@ class CommitmentHints:
                     if (g.initial_status is not None and g.initial_status > 0)
                     else 0.0
                 )
+                # Network-aware features
+                pi = float(ptdf_impact.get(g.name, 0.0))
+                pm = float(ptdf_mean.get(g.name, 0.0))
+                bd = float(bus_degree.get(g.name, 0.0)) / max(1.0, float(len(sc.lines)))
                 for t in range(T):
                     pmin = float(g.min_power[t]) / max(1.0, sum_pmax)
                     pmax = float(g.max_power[t]) / max(1.0, sum_pmax)
@@ -307,6 +343,9 @@ class CommitmentHints:
                             "sd_frac": sd,
                             "must": must,
                             "init_on": init_on,
+                            "ptdf_impact": pi,
+                            "ptdf_mean": pm,
+                            "bus_degree_frac": bd,
                             "y": y,
                         }
                     )
@@ -317,11 +356,12 @@ class CommitmentHints:
         return df
 
     def pretrain(
-        self, force: bool = False, limit: Optional[int] = None
+        self, force: bool = False, limit: Optional[int] = None,
+        restrict_to_names: Optional[set] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        df = self._build_training_df(limit=limit)
+        df = self._build_training_df(limit=limit, restrict_to_names=restrict_to_names)
         if df is None or df.empty:
             print(f"[commit_hints] No training data found for {self.case}")
             return None
@@ -377,6 +417,38 @@ class CommitmentHints:
             sum_pmax += float(np.mean([float(x) for x in g.max_power]))
         if sum_pmax <= 0:
             sum_pmax = 1.0
+
+        # Compute PTDF-derived network-aware features
+        ptdf_impact = {}
+        ptdf_mean_map = {}
+        bus_degree = {}
+        try:
+            isf = sc.isf.tocsc()
+            buses = sc.buses
+            ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
+            non_ref = sorted([b.index for b in buses if b.index != ref_1b])
+            col_map = {bidx: c for c, bidx in enumerate(non_ref)}
+            bdeg = {}
+            for ln in sc.lines:
+                bdeg[ln.source.index] = bdeg.get(ln.source.index, 0) + 1
+                bdeg[ln.target.index] = bdeg.get(ln.target.index, 0) + 1
+            for g in sc.thermal_units:
+                bidx = g.bus.index
+                bus_degree[g.name] = float(bdeg.get(bidx, 0))
+                if bidx == ref_1b or bidx not in col_map:
+                    ptdf_impact[g.name] = 0.0
+                    ptdf_mean_map[g.name] = 0.0
+                else:
+                    col = isf.getcol(col_map[bidx])
+                    vals = np.abs(col.data)
+                    ptdf_impact[g.name] = float(vals.max()) if len(vals) > 0 else 0.0
+                    ptdf_mean_map[g.name] = float(vals.mean()) if len(vals) > 0 else 0.0
+        except Exception:
+            for g in sc.thermal_units:
+                ptdf_impact[g.name] = 0.0
+                ptdf_mean_map[g.name] = 0.0
+                bus_degree[g.name] = 0.0
+
         rows = []
         keys = []
         for g in sc.thermal_units:
@@ -387,6 +459,9 @@ class CommitmentHints:
             init_on = (
                 1.0 if (g.initial_status is not None and g.initial_status > 0) else 0.0
             )
+            pi = float(ptdf_impact.get(g.name, 0.0))
+            pm = float(ptdf_mean_map.get(g.name, 0.0))
+            bd = float(bus_degree.get(g.name, 0.0)) / max(1.0, float(len(sc.lines)))
             for t in range(T):
                 load_frac = float(sys_load[min(t, len(sys_load) - 1)]) / max(
                     1.0, sum_pmax
@@ -395,9 +470,10 @@ class CommitmentHints:
                 pmax = float(g.max_power[t]) / max(1.0, sum_pmax)
                 must = 1.0 if bool(g.must_run[t]) else 0.0
                 tt = float(t) / max(1, T - 1)
-                rows.append([load_frac, tt, pmin, pmax, ru, rd, su, sd, must, init_on])
+                rows.append([load_frac, tt, pmin, pmax, ru, rd, su, sd, must, init_on,
+                             pi, pm, bd])
                 keys.append((g.name, t))
-        X = np.array(rows, dtype=float) if rows else np.zeros((0, 10), dtype=float)
+        X = np.array(rows, dtype=float) if rows else np.zeros((0, 13), dtype=float)
         return X, keys
 
     def apply_to_model(

@@ -12,9 +12,9 @@ from scipy.sparse import csc_matrix
 @dataclass
 class LazyContingencyConfig:
     # Numerical tolerances
-    lodf_tol: float = 1e-2
-    isf_tol: float = 1e-3
-    violation_tol: float = 1e-3  # add a constraint if viol > this
+    lodf_tol: float = 1e-4
+    isf_tol: float = 1e-8
+    violation_tol: float = 1e-6  # add a constraint if viol > this
 
     # Limit how many constraints we add per incumbent (0 => add all violated)
     add_top_k: int = 0
@@ -24,6 +24,12 @@ class LazyContingencyConfig:
 
     # Optional bandit policy (object with choose_k(context)->int, update(chosen_k,reward,context)->None)
     topk_policy: object = None
+
+    # Optional pair-level masks (set of (line_name, outage_name) tuples to keep)
+    keep_line_pairs: Optional[set] = None
+    keep_gen_pairs: Optional[set] = None
+    # Optional set of monitored line names to restrict checking
+    allowed_monitored_lines: Optional[set] = None
 
 
 def attach_lazy_contingency_callback(
