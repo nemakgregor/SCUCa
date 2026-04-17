@@ -119,11 +119,9 @@ class WarmStartProvider:
     Inference: generate_and_save_warm_start() writes a warm JSON capturing a neighbor's
     solution, and apply_warm_start_to_model() sets Start values on the current model.
 
-    New in this version:
-      - generate_and_save_warm_start(..., auto_fix=True) will automatically build a
-        'warm_fixed_<instance>.json' using src.ml_models.fix_warm_start (no Gurobi).
-      - apply_warm_start_to_model(...) now prefers a 'warm_fixed_<instance>.json' file
-        if present, falling back to 'warm_<instance>.json'.
+    This provider stores deterministic warm-start JSON files:
+      - generate_and_save_warm_start(...) writes 'warm_<instance>.json'
+      - apply_warm_start_to_model(...) consumes the same file
     """
 
     def __init__(
@@ -360,16 +358,11 @@ class WarmStartProvider:
             return None
         return self._save_index_file(cf)
 
-    def ensure_trained(
-        self, case_folder: Optional[str] = None, allow_build_if_missing: bool = True
-    ) -> Tuple[bool, float]:
+    def ensure_trained(self, case_folder: Optional[str] = None) -> Tuple[bool, float]:
         cf = case_folder or self.case_folder
         if not cf:
             return False, 0.0
         if self._load_index_file(cf):
-            return (self._available or self._trained), self._coverage
-        if allow_build_if_missing:
-            self._build_index(cf)
             return (self._available or self._trained), self._coverage
         return False, 0.0
 
@@ -421,7 +414,6 @@ class WarmStartProvider:
         k: int = 5,
         use_train_index_only: bool = False,
         exclude_self: bool = True,
-        auto_fix: bool = True,
     ) -> Optional[Path]:
         """
         Weighted k-NN warm start: blend k nearest neighbors by inverse distance.
@@ -432,7 +424,7 @@ class WarmStartProvider:
         case_folder = _case_folder_from_instance(instance_name)
 
         if not self._trained_index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._trained_index:
             return None
 
@@ -546,14 +538,6 @@ class WarmStartProvider:
         out_path = (self.base_warm / fname).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        if auto_fix:
-            try:
-                from src.ml_models.fix_warm_start import fix_warm_file
-                fix_warm_file(instance_name, warm_file=out_path)
-            except Exception as e:
-                print(f"[warm_start] Auto-fix failed for {instance_name}: {e}")
-
         return out_path
 
     def generate_and_save_warm_start(
@@ -561,7 +545,6 @@ class WarmStartProvider:
         instance_name: str,
         use_train_index_only: bool = False,
         exclude_self: bool = True,
-        auto_fix: bool = True,
         k: int = 1,
     ) -> Optional[Path]:
         # Dispatch to weighted k-NN when k > 1
@@ -569,12 +552,12 @@ class WarmStartProvider:
             return self.generate_weighted_warm_start(
                 instance_name, k=k,
                 use_train_index_only=use_train_index_only,
-                exclude_self=exclude_self, auto_fix=auto_fix,
+                exclude_self=exclude_self,
             )
         case_folder = _case_folder_from_instance(instance_name)
 
         if not self._trained_index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._trained_index:
             return None
 
@@ -618,17 +601,6 @@ class WarmStartProvider:
         out_path = (self.base_warm / fname).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        # Automatically produce a fixed warm JSON (no Gurobi), if requested
-        if auto_fix:
-            try:
-                from src.ml_models.fix_warm_start import fix_warm_file
-
-                fix_warm_file(instance_name, warm_file=out_path)
-            except Exception as e:
-                # non-fatal: fall back to raw warm if fixer fails
-                print(f"[warm_start] Auto-fix failed for {instance_name}: {e}")
-
         return out_path
 
     @staticmethod
@@ -655,9 +627,8 @@ class WarmStartProvider:
         """
         Set Start on model vars using a warm JSON for 'instance_name'.
 
-        Preference order for input file:
-          1) warm_fixed_<instance>.json (if exists)
-          2) warm_<instance>.json
+        Input file:
+          - warm_<instance>.json
 
         mode:
           - "repair"      -> apply and repair to satisfy easy constraints
@@ -669,20 +640,10 @@ class WarmStartProvider:
         if mode not in ("repair", "commit-only", "as-is"):
             mode = "repair"
 
-        # Prefer fixed warm file if present
         tag = _sanitize_name(instance_name)
-        fixed_path = (self.base_warm / f"warm_fixed_{tag}.json").resolve()
-        if fixed_path.exists():
-            fpath = fixed_path
-        else:
-            fpath = (self.base_warm / f"warm_{tag}.json").resolve()
-            if not fpath.exists():
-                alt = (
-                    self.base_warm / f"warm_{_sanitize_name(scenario.name)}.json"
-                ).resolve()
-                if not alt.exists():
-                    return 0
-                fpath = alt
+        fpath = (self.base_warm / f"warm_{tag}.json").resolve()
+        if not fpath.exists():
+            return 0
 
         try:
             warm = json.loads(fpath.read_text(encoding="utf-8"))
@@ -1048,7 +1009,7 @@ class WarmStartProvider:
                 break
             count += 1
             p = self.generate_and_save_warm_start(
-                nm, use_train_index_only=use_train_db, exclude_self=True, auto_fix=True
+                nm, use_train_index_only=use_train_db, exclude_self=True
             )
             out.append((nm, p))
         return out
@@ -1084,7 +1045,7 @@ if __name__ == "__main__":
         "--generate-for",
         choices=["train", "val", "test"],
         default=None,
-        help="Generate warm-start files for the chosen split (auto-fix on)",
+        help="Generate warm-start files for the chosen split",
     )
     ap.add_argument(
         "--use-train-db",
@@ -1117,7 +1078,7 @@ if __name__ == "__main__":
         else:
             print("No data to build index.")
     else:
-        wsp.ensure_trained(args.case, allow_build_if_missing=True)
+        wsp.ensure_trained(args.case)
 
     if args.report:
         wsp.report_splits()

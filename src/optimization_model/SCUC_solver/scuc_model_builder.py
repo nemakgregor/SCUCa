@@ -72,6 +72,9 @@ def build_model(
         line_flow, line_over_pos, line_over_neg = scuc_vars.line_flow.add_variables(
             model, scenario.lines, time_periods
         )
+        bus_angle = scuc_vars.bus_angle.add_variables(model, scenario.buses, time_periods)
+    else:
+        bus_angle = None
 
     cont_over_pos = None
     cont_over_neg = None
@@ -118,8 +121,8 @@ def build_model(
         )
 
     if scenario.lines:
-        scuc_cons.line_flow_ptdf.add_constraints(
-            model, scenario, gen_commit, gen_segment_power, line_flow, time_periods
+        scuc_cons.line_flow_dc.add_constraints(
+            model, scenario, gen_commit, gen_segment_power, bus_angle, line_flow, time_periods
         )
         scuc_cons.line_limits.add_constraints(
             model, scenario.lines, line_flow, line_over_pos, line_over_neg, time_periods

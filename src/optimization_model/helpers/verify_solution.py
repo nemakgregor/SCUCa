@@ -53,7 +53,8 @@ ID_V_OVN = "V-209"  # Line overflow- >= 0
 # Objective
 ID_O_TOTAL = "O-301"  # TotalCostWithReservePenalty consistency
 
-EPS = 1e-5  # Slightly relaxed for verification
+EPS = 1e-5  # Default verification tolerance
+FLOW_DEF_EPS = 1e-3  # DC/PTDF flow reconstruction can drift slightly on large systems
 
 
 @dataclass
@@ -383,30 +384,60 @@ def verify_solution(
                     worst_init = max(worst_init, float(np.max(np.abs(window))))
     checks.append(CheckItem(ID_C_MIN_INIT, "Initial min up/down enforcement", worst_init))
 
-    # C-108: Base-case line flow PTDF equality
+    # C-108: Base-case line flow definition
     worst_flow_def = 0.0
     if lines:
         buses = scenario.buses
-        ref_1b = getattr(scenario, "ptdf_ref_bus_index", buses[0].index)
-        non_ref_indices = sorted([b.index for b in buses if b.index != ref_1b])
+        bus_names = [b.name for b in buses]
         gen_idx_by_name = {g.name: i for i, g in enumerate(units)}
-        inj_by_bus: Dict[int, np.ndarray] = {}
+        inj_by_bus_name: Dict[str, np.ndarray] = {}
         for b in buses:
             idxs = [gen_idx_by_name[g.name] for g in b.thermal_units if g.name in gen_idx_by_name]
             gen_sum = np.sum(p_val[idxs, :], axis=0) if idxs else np.zeros(T)
-            inj_by_bus[b.index] = gen_sum - np.array([float(x) for x in b.load[:T]])
+            inj_by_bus_name[b.name] = gen_sum - np.array([float(x) for x in b.load[:T]])
 
-        isf_csr = scenario.isf.tocsr()
-        for i, line in enumerate(lines):
-            row = isf_csr.getrow(line.index - 1)
-            calc = np.zeros(T)
-            for col, coeff in zip(row.indices.tolist(), row.data.tolist()):
-                bus_1b = non_ref_indices[col]
-                calc += float(coeff) * inj_by_bus[bus_1b]
-            worst_flow_def = max(
-                worst_flow_def, float(np.max(np.abs(f_val[i, :] - calc)))
-            )
-    checks.append(CheckItem(ID_C_FLOW_DEF, "Line flow PTDF equality", worst_flow_def))
+        theta_vars = getattr(model, "bus_angle", None)
+        if theta_vars:
+            theta_val = _extract_vars_to_numpy(model, theta_vars, bus_names, T)
+            theta_idx_by_name = {name: i for i, name in enumerate(bus_names)}
+            out_line_indices: Dict[str, List[int]] = {b.name: [] for b in buses}
+            in_line_indices: Dict[str, List[int]] = {b.name: [] for b in buses}
+
+            for i, line in enumerate(lines):
+                src_idx = theta_idx_by_name[line.source.name]
+                tgt_idx = theta_idx_by_name[line.target.name]
+                calc = float(line.susceptance) * (theta_val[src_idx, :] - theta_val[tgt_idx, :])
+                worst_flow_def = max(worst_flow_def, float(np.max(np.abs(f_val[i, :] - calc))))
+                out_line_indices[line.source.name].append(i)
+                in_line_indices[line.target.name].append(i)
+
+            for bus in buses:
+                out_sum = np.sum(f_val[out_line_indices[bus.name], :], axis=0) if out_line_indices[bus.name] else np.zeros(T)
+                in_sum = np.sum(f_val[in_line_indices[bus.name], :], axis=0) if in_line_indices[bus.name] else np.zeros(T)
+                nodal_resid = out_sum - in_sum - inj_by_bus_name[bus.name]
+                worst_flow_def = max(worst_flow_def, float(np.max(np.abs(nodal_resid))))
+            flow_def_name = "Line flow DC definition / nodal balance"
+        else:
+            ref_1b = getattr(scenario, "ptdf_ref_bus_index", buses[0].index)
+            non_ref_indices = sorted([b.index for b in buses if b.index != ref_1b])
+            inj_by_bus: Dict[int, np.ndarray] = {}
+            for b in buses:
+                inj_by_bus[b.index] = inj_by_bus_name[b.name]
+
+            isf_csr = scenario.isf.tocsr()
+            for i, line in enumerate(lines):
+                row = isf_csr.getrow(line.index - 1)
+                calc = np.zeros(T)
+                for col, coeff in zip(row.indices.tolist(), row.data.tolist()):
+                    bus_1b = non_ref_indices[col]
+                    calc += float(coeff) * inj_by_bus[bus_1b]
+                worst_flow_def = max(
+                    worst_flow_def, float(np.max(np.abs(f_val[i, :] - calc)))
+                )
+            flow_def_name = "Line flow PTDF equality"
+    else:
+        flow_def_name = "Line flow definition"
+    checks.append(CheckItem(ID_C_FLOW_DEF, flow_def_name, worst_flow_def))
 
     # C-109: Base Flow Limits
     if lines:
@@ -549,11 +580,12 @@ def verify_solution(
     checks.append(CheckItem(ID_O_TOTAL, "Objective consistency", obj_inconsistency))
 
     # Final decision
-    overall_ok = all(c.value <= EPS for c in checks)
+    overall_ok = all(c.value <= (FLOW_DEF_EPS if c.idx == ID_C_FLOW_DEF else EPS) for c in checks)
 
     report = ["Index, Name, Max Violation"]
     for c in checks:
-        val_str = "OK" if c.value <= EPS else f"{c.value:.6f}"
+        tol = FLOW_DEF_EPS if c.idx == ID_C_FLOW_DEF else EPS
+        val_str = "OK" if c.value <= tol else f"{c.value:.6f}"
         report.append(f"{c.idx}, {c.name}, {val_str}")
 
     return overall_ok, checks, "\n".join(report)

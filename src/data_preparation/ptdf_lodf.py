@@ -107,7 +107,7 @@ def compute_ptdf_lodf(scenario: UnitCommitmentScenario) -> None:
             return lu.solve(rhs)
 
     except Exception:
-        # Fallback: dense solve (small systems)
+        # Dense solve path (small systems)
         B_red_dense = B_red.toarray()
 
         def solve(rhs):

@@ -482,16 +482,11 @@ class RedundancyProvider:
             return None
         return self._save_index_file(cf)
 
-    def ensure_trained(
-        self, case_folder: Optional[str] = None, allow_build_if_missing: bool = True
-    ) -> Tuple[bool, float]:
+    def ensure_trained(self, case_folder: Optional[str] = None) -> Tuple[bool, float]:
         cf = case_folder or self.case_folder
         if not cf:
             return False, 0.0
         if self._load_index_file(cf):
-            return (self._available, self._coverage)
-        if allow_build_if_missing:
-            self._build_index(cf)
             return (self._available, self._coverage)
         return False, 0.0
 
@@ -539,7 +534,7 @@ class RedundancyProvider:
         """
         case_folder = _case_folder_from_instance(instance_name)
         if not self._index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._index:
             return None
 

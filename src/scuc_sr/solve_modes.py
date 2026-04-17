@@ -13,7 +13,6 @@ from src.optimization_model.SCUC_solver.scuc_model_builder import build_model
 from src.optimization_model.helpers.lazy_contingency_cb import (
     attach_lazy_contingency_callback,
     LazyContingencyConfig,
-    optimize_with_lazy_callback,
 )
 from src.ml_models.redundant_constraints import RedundancyProvider
 from src.optimization_model.helpers.verify_solution import verify_solution
@@ -180,7 +179,11 @@ def run_raw(
         model, time_limit, mip_gap, output_log, log_file, threads=threads
     )
     # No lazy callback attached here; this reduces to a plain optimize().
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"raw:{instance_name}")
     return model, _metrics_from_model(model)
@@ -213,7 +216,11 @@ def run_sr(
     _apply_common_gurobi_params(
         model, time_limit, mip_gap, output_log, log_file, threads=threads
     )
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"sr:{instance_name}")
     added = stats.get("explicit_total", 0)
@@ -266,7 +273,11 @@ def run_prune(
     _apply_common_gurobi_params(
         model, time_limit, mip_gap, output_log, log_file, threads=threads
     )
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
 
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"prune:{instance_name}")
@@ -314,7 +325,11 @@ def run_lazy(
         model.Params.LazyConstraints = 1
     except Exception:
         pass
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"lazy:{instance_name}")
     metrics = _metrics_from_model(model)
@@ -378,7 +393,11 @@ def run_prune_lazy(
         model.Params.LazyConstraints = 1
     except Exception:
         pass
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"prune_lazy:{instance_name}")
     metrics = _metrics_from_model(model)
@@ -440,7 +459,11 @@ def run_sr_lazy(
         model.Params.LazyConstraints = 1
     except Exception:
         pass
-    optimize_with_lazy_callback(model)
+    callback = getattr(model, "_lazy_contingency_callback", None)
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
 
     stats = _collect_constraint_stats(model)
     _log_constraint_stats(stats, sc, f"sr_lazy:{instance_name}")

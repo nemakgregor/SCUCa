@@ -14,7 +14,6 @@ from src.optimization_model.SCUC_solver.scuc_model_builder import build_model
 from src.optimization_model.helpers.lazy_contingency_cb import (
     LazyContingencyConfig,
     attach_lazy_contingency_callback,
-    optimize_with_lazy_callback,
 )
 from src.scuc_sr.constraint_enumerator import ConstraintEvent, enumerate_potential_constraints
 
@@ -23,6 +22,7 @@ from src.scuc_sr.constraint_enumerator import ConstraintEvent, enumerate_potenti
 class ActiveSetConfig:
     time_limit: int = 600
     mip_gap: float = 0.05
+    no_rel_heur_time: float = 0.0
     lodf_tol: float = 1e-4
     isf_tol: float = 1e-8
     violation_tol: float = 1e-6
@@ -49,6 +49,7 @@ class ActiveSetReport:
 class RollingHorizonConfig:
     time_limit: int = 600
     mip_gap: float = 0.05
+    no_rel_heur_time: float = 0.0
     window_size: int = 8
     overlap: int = 2
     lodf_tol: float = 1e-4
@@ -97,6 +98,7 @@ class SolutionProxy:
         num_constrs: int,
         num_bin: int,
         num_int: int,
+        sol_count: int = 1,
         commit: Dict[Tuple[str, int], float],
         startup: Dict[Tuple[str, int], float],
         shutdown: Dict[Tuple[str, int], float],
@@ -119,6 +121,7 @@ class SolutionProxy:
         self.NumConstrs = int(num_constrs)
         self.NumBinVars = int(num_bin)
         self.NumIntVars = int(num_int)
+        self.SolCount = int(sol_count)
         self.commit = {k: _ValueProxy(v) for k, v in commit.items()}
         self.startup = {k: _ValueProxy(v) for k, v in startup.items()}
         self.shutdown = {k: _ValueProxy(v) for k, v in shutdown.items()}
@@ -155,6 +158,7 @@ def _set_gurobi_params(
     *,
     time_limit: float,
     mip_gap: float,
+    no_rel_heur_time: float = 0.0,
     output_flag: int,
     threads: int = 0,
 ) -> None:
@@ -165,6 +169,8 @@ def _set_gurobi_params(
     model.setParam("TimeLimit", float(time_limit))
     model.setParam("MIPGap", float(mip_gap))
     model.setParam("NumericFocus", 1)
+    if float(no_rel_heur_time) > 0.0:
+        model.setParam("NoRelHeurTime", float(no_rel_heur_time))
     if threads and threads > 0:
         model.setParam("Threads", int(threads))
 
@@ -320,10 +326,15 @@ def optimize_with_active_set(
             model,
             time_limit=max(1e-3, remaining),
             mip_gap=float(config.mip_gap),
+            no_rel_heur_time=float(config.no_rel_heur_time),
             output_flag=int(config.output_flag),
             threads=int(config.threads),
         )
-        optimize_with_lazy_callback(model)
+        callback = getattr(model, "_lazy_contingency_callback", None)
+        if callback is None:
+            model.optimize()
+        else:
+            model.optimize(callback)
         report.iterations = it
 
         status = int(getattr(model, "Status", -1))
@@ -484,53 +495,53 @@ def _extract_window_values(
     reserve = getattr(model, "reserve", None)
     shortfall = getattr(model, "reserve_shortfall", None)
 
+    def _safe_x(container, key, default: float = 0.0) -> float:
+        if container is None:
+            return float(default)
+        try:
+            return float(container[key].X)
+        except Exception:
+            return float(default)
+
     for gen in scenario.thermal_units:
         n_seg = len(gen.segments) if gen.segments else 0
         for t in range(T):
-            u_t = float(commit[gen.name, t].X) if commit is not None else 0.0
+            u_t = _safe_x(commit, (gen.name, t), 0.0)
             out["commit"][(gen.name, t)] = u_t
-            out["startup"][(gen.name, t)] = (
-                float(startup[gen.name, t].X) if startup is not None else 0.0
-            )
-            out["shutdown"][(gen.name, t)] = (
-                float(shutdown[gen.name, t].X) if shutdown is not None else 0.0
-            )
+            out["startup"][(gen.name, t)] = _safe_x(startup, (gen.name, t), 0.0)
+            out["shutdown"][(gen.name, t)] = _safe_x(shutdown, (gen.name, t), 0.0)
             total = u_t * float(gen.min_power[t])
             for s in range(n_seg):
-                v = float(seg[gen.name, t, s].X) if seg is not None else 0.0
+                v = _safe_x(seg, (gen.name, t, s), 0.0)
                 out["gen_segment_power"][(gen.name, t, s)] = v
                 total += v
             out["total_power"][(gen.name, t)] = total
 
     for line in scenario.lines or []:
         for t in range(T):
-            out["line_flow"][(line.name, t)] = (
-                float(line_flow[line.name, t].X) if line_flow is not None else 0.0
+            out["line_flow"][(line.name, t)] = _safe_x(line_flow, (line.name, t), 0.0)
+            out["line_overflow_pos"][(line.name, t)] = _safe_x(ovp, (line.name, t), 0.0)
+            out["line_overflow_neg"][(line.name, t)] = _safe_x(ovn, (line.name, t), 0.0)
+            out["contingency_overflow_pos"][(line.name, t)] = _safe_x(
+                covp, (line.name, t), 0.0
             )
-            out["line_overflow_pos"][(line.name, t)] = (
-                float(ovp[line.name, t].X) if ovp is not None else 0.0
-            )
-            out["line_overflow_neg"][(line.name, t)] = (
-                float(ovn[line.name, t].X) if ovn is not None else 0.0
-            )
-            out["contingency_overflow_pos"][(line.name, t)] = (
-                float(covp[line.name, t].X) if covp is not None else 0.0
-            )
-            out["contingency_overflow_neg"][(line.name, t)] = (
-                float(covn[line.name, t].X) if covn is not None else 0.0
+            out["contingency_overflow_neg"][(line.name, t)] = _safe_x(
+                covn, (line.name, t), 0.0
             )
 
     if reserve is not None:
         for r in scenario.reserves or []:
             for gen in r.thermal_units:
                 for t in range(T):
-                    out["reserve"][(r.name, gen.name, t)] = float(
-                        reserve[r.name, gen.name, t].X
+                    out["reserve"][(r.name, gen.name, t)] = _safe_x(
+                        reserve, (r.name, gen.name, t), 0.0
                     )
     if shortfall is not None:
         for r in scenario.reserves or []:
             for t in range(T):
-                out["reserve_shortfall"][(r.name, t)] = float(shortfall[r.name, t].X)
+                out["reserve_shortfall"][(r.name, t)] = _safe_x(
+                    shortfall, (r.name, t), 0.0
+                )
 
     return out
 
@@ -643,6 +654,7 @@ def solve_rolling_horizon(
     report.window_size = int(win)
     report.overlap = int(overlap)
     worst_status = GRB.OPTIMAL
+    full_horizon_solution = False
     t_start = time.time()
 
     starts = list(range(0, T, step))
@@ -660,6 +672,7 @@ def solve_rolling_horizon(
             model,
             time_limit=max(1e-3, remaining),
             mip_gap=float(config.mip_gap),
+            no_rel_heur_time=float(config.no_rel_heur_time),
             output_flag=int(config.output_flag),
             threads=int(config.threads),
         )
@@ -677,7 +690,11 @@ def solve_rolling_horizon(
             pass
 
         t0 = time.time()
-        optimize_with_lazy_callback(model)
+        callback = getattr(model, "_lazy_contingency_callback", None)
+        if callback is None:
+            model.optimize()
+        else:
+            model.optimize(callback)
         report.total_runtime += time.time() - t0
         report.window_count += 1
         report.total_nodes += float(getattr(model, "NodeCount", 0.0) or 0.0)
@@ -693,10 +710,18 @@ def solve_rolling_horizon(
             pass
 
         status = int(getattr(model, "Status", -1))
+        sol_count = int(getattr(model, "SolCount", 0) or 0)
         if status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             worst_status = status
         elif worst_status == GRB.OPTIMAL and status != GRB.OPTIMAL:
             worst_status = status
+
+        if sol_count <= 0:
+            try:
+                model.dispose()
+            except Exception:
+                pass
+            break
 
         window_vals = _extract_window_values(sc_win, model)
         commit_until = end if end >= T else min(end, start + step)
@@ -746,18 +771,23 @@ def solve_rolling_horizon(
             pass
 
         if end >= T:
+            full_horizon_solution = report.committed_periods >= T
             break
 
-    obj_val = _compute_proxy_objective(
-        scenario,
-        global_store["commit"],
-        global_store["startup"],
-        global_store["gen_segment_power"],
-        global_store["line_overflow_pos"],
-        global_store["line_overflow_neg"],
-        global_store["contingency_overflow_pos"],
-        global_store["contingency_overflow_neg"],
-        global_store["reserve_shortfall"],
+    obj_val = (
+        _compute_proxy_objective(
+            scenario,
+            global_store["commit"],
+            global_store["startup"],
+            global_store["gen_segment_power"],
+            global_store["line_overflow_pos"],
+            global_store["line_overflow_neg"],
+            global_store["contingency_overflow_pos"],
+            global_store["contingency_overflow_neg"],
+            global_store["reserve_shortfall"],
+        )
+        if full_horizon_solution
+        else float("nan")
     )
     proxy = SolutionProxy(
         status=int(worst_status),
@@ -770,6 +800,7 @@ def solve_rolling_horizon(
         num_constrs=int(report.max_num_constrs),
         num_bin=int(report.max_num_bin),
         num_int=int(report.max_num_int),
+        sol_count=1 if full_horizon_solution else 0,
         commit=global_store["commit"],
         startup=global_store["startup"],
         shutdown=global_store["shutdown"],

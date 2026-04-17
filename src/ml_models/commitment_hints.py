@@ -1,11 +1,10 @@
 """
-CommitmentHints: lightweight CatBoost/SKLearn classifier to predict unit commitment
+CommitmentHints: CatBoost classifier to predict unit commitment
 u[g,t] and inject "soft" guidance into the solver (Start, VarHintVal, BranchPriority).
 Trains from solved JSON solutions in src/data/output/<case_folder>.
 
 Key features
 - Offline training per case folder (e.g., matpower/case118).
-- Handles missing CatBoost by falling back to scikit-learn GradientBoostingClassifier.
 - Only uses "safe" features available from inputs and simple time descriptors:
   • system load fraction at time t (sum(load)/sum(Pmax))
   • t/T
@@ -20,7 +19,7 @@ Key features
     Note: we recommend NOT fixing; hints + Start are safer and effective.
 
 CLI examples:
-- Train for case118 (CatBoost if available; else SKLearn GBDT):
+- Train for case118:
     python -m src.ml_models.commitment_hints --case matpower/case118 --force
 
 - Inspect trained model path:
@@ -46,21 +45,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-
-try:
-    from catboost import CatBoostClassifier
-
-    HAVE_CATBOOST = True
-except ImportError:
-    HAVE_CATBOOST = False
-
-try:
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.metrics import roc_auc_score
-
-    HAVE_SKLEARN = True
-except ImportError:
-    HAVE_SKLEARN = False
+from catboost import CatBoostClassifier
+from sklearn.metrics import roc_auc_score
 
 from src.data_preparation.params import DataParams
 from src.data_preparation.read_data import read_benchmark
@@ -137,92 +123,21 @@ def _load_system_load_from_input(instance_name: str) -> Optional[List[float]]:
     return sys_load
 
 
-class _SimpleModelWrap:
-    """Abstraction layer to unify CatBoost and SKLearn calls."""
-
-    def __init__(self, model_type: str = "auto"):
-        self.kind = (
-            "cb" if HAVE_CATBOOST and model_type in ("auto", "catboost") else "sk"
-        )
-        if self.kind == "cb":
-            self.model = CatBoostClassifier(
-                iterations=500,
-                learning_rate=0.06,
-                depth=6,
-                loss_function="Logloss",
-                verbose=False,
-                random_state=42,
-            )
-        else:
-            if not HAVE_SKLEARN:
-                raise RuntimeError("Neither CatBoost nor scikit-learn is available.")
-            self.model = GradientBoostingClassifier(
-                random_state=42, n_estimators=500, learning_rate=0.06, max_depth=6
-            )
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
-        if self.kind == "cb":
-            self.model.fit(X, y)
-        else:
-            self.model.fit(X, y)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.kind == "cb":
-            p = self.model.predict_proba(X)
-            return np.array(p)[:, 1]
-        else:
-            p = self.model.predict_proba(X)[:, 1]
-            return np.array(p)
-
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if self.kind == "cb":
-            self.model.save_model(str(path))
-        else:
-            # SKLearn: save as JSON-ish with numpy arrays
-            payload = {
-                "kind": "sk",
-                "model_bytes": None,
-            }
-            # Use joblib if available
-            try:
-                import joblib
-
-                joblib.dump(self.model, path)
-                return
-            except Exception:
-                pass
-            # Fallback: cannot serialize; raise
-            raise RuntimeError("Install joblib to save SKLearn model")
-
-    @staticmethod
-    def load(path: Path):
-        if HAVE_CATBOOST and (path.suffix.lower() in (".cbm", "")):
-            # Try CatBoost
-            try:
-                m = CatBoostClassifier()
-                m.load_model(str(path))
-                w = _SimpleModelWrap("catboost")
-                w.kind = "cb"
-                w.model = m
-                return w
-            except Exception:
-                pass
-        # Try joblib for SKLearn
-        try:
-            import joblib
-
-            mdl = joblib.load(path)
-            w = _SimpleModelWrap(model_type="auto")
-            w.kind = "sk"
-            w.model = mdl
-            return w
-        except Exception as e:
-            raise RuntimeError(f"Cannot load model from {path}: {e}")
+def _new_catboost_model() -> CatBoostClassifier:
+    return CatBoostClassifier(
+        iterations=500,
+        learning_rate=0.06,
+        depth=6,
+        loss_function="Logloss",
+        verbose=False,
+        random_seed=42,
+        thread_count=1,
+        task_type="CPU",
+    )
 
 
 class CommitmentHints:
-    def __init__(self, case_folder: str, model_type: str = "auto"):
+    def __init__(self, case_folder: str):
         self.case = case_folder.strip().strip("/\\").replace("\\", "/")
         self.tag = _case_tag(self.case)
         self.base_dir = (
@@ -233,8 +148,8 @@ class CommitmentHints:
             self.base_dir / "commit_model.cbm"
         ).resolve()  # CatBoost default ext
         self.meta_path = (self.base_dir / "meta.json").resolve()
-        self.model_type = model_type
-        self.model: Optional[_SimpleModelWrap] = None
+        self.model: Optional[CatBoostClassifier] = None
+        self.constant_target: Optional[int] = None
         self.meta: Dict = {}
 
     def _build_training_df(self, limit: Optional[int] = None, restrict_to_names: Optional[set] = None) -> Optional[pd.DataFrame]:
@@ -361,26 +276,50 @@ class CommitmentHints:
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
+        self.model = None
+        self.constant_target = None
         df = self._build_training_df(limit=limit, restrict_to_names=restrict_to_names)
         if df is None or df.empty:
             print(f"[commit_hints] No training data found for {self.case}")
             return None
         X = df.drop(columns=["y"]).to_numpy(dtype=float)
         y = df["y"].to_numpy(dtype=int)
-        mdl = _SimpleModelWrap(self.model_type)
+        unique_targets = np.unique(y)
+        if unique_targets.size == 1:
+            constant_target = int(unique_targets[0])
+            if self.model_path.exists():
+                self.model_path.unlink()
+            meta = {
+                "case_folder": self.case,
+                "features": list(df.drop(columns=["y"]).columns),
+                "auc_train": None,
+                "saved_model": None,
+                "constant_target": constant_target,
+            }
+            self.meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            self.meta = meta
+            self.constant_target = constant_target
+            print(
+                f"[commit_hints] Stored constant predictor for {self.case}: "
+                f"target={constant_target}"
+            )
+            return self.meta_path
+        mdl = _new_catboost_model()
         mdl.fit(X, y)
         # Basic AUC on sample (optional)
         try:
-            p = mdl.predict_proba(X)
+            p = np.array(mdl.predict_proba(X), dtype=float)[:, 1]
             auc = roc_auc_score(y, p)
         except Exception:
             auc = None
-        mdl.save(self.model_path)
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        mdl.save_model(str(self.model_path))
         meta = {
             "case_folder": self.case,
             "features": list(df.drop(columns=["y"]).columns),
             "auc_train": None if auc is None else float(auc),
             "saved_model": str(self.model_path),
+            "constant_target": None,
         }
         self.meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         self.model = mdl
@@ -389,19 +328,22 @@ class CommitmentHints:
         return self.model_path
 
     def ensure_trained(self) -> bool:
-        if self.model is not None:
+        if self.model is not None or self.constant_target is not None:
+            return True
+        self.meta = (
+            json.loads(self.meta_path.read_text(encoding="utf-8"))
+            if self.meta_path.exists()
+            else {}
+        )
+        constant_target = self.meta.get("constant_target")
+        if constant_target is not None:
+            self.constant_target = int(constant_target)
             return True
         if self.model_path.exists():
-            try:
-                self.model = _SimpleModelWrap.load(self.model_path)
-                self.meta = (
-                    json.loads(self.meta_path.read_text(encoding="utf-8"))
-                    if self.meta_path.exists()
-                    else {}
-                )
-                return True
-            except Exception:
-                return False
+            model = CatBoostClassifier()
+            model.load_model(str(self.model_path))
+            self.model = model
+            return True
         return False
 
     def _features_for_instance(
@@ -485,7 +427,7 @@ class CommitmentHints:
         Returns number of variables touched.
         """
         ok = self.ensure_trained()
-        if not ok or self.model is None:
+        if not ok:
             return 0
         commit = getattr(model, "commit", None)
         if commit is None:
@@ -493,7 +435,12 @@ class CommitmentHints:
         X, keys = self._features_for_instance(sc, instance_name)
         if X.shape[0] == 0:
             return 0
-        prob = self.model.predict_proba(X)
+        if self.constant_target is not None:
+            prob = np.full(X.shape[0], float(self.constant_target), dtype=float)
+        elif self.model is not None:
+            prob = np.array(self.model.predict_proba(X), dtype=float)[:, 1]
+        else:
+            return 0
         applied = 0
         # derive time horizon to set priorities: earlier t higher priority
         times = [t for _, t in keys]

@@ -51,10 +51,10 @@ def aggregate_radii_over_instances(
     scenarios: List, *, t: int = 0, balance: str = "agc", sigma_sr: float = 0.3
 ) -> Dict[str, Dict[str, float]]:
     """
-    Aggregate radii across scenarios. Returns both mean (legacy) and min:
+    Aggregate radii across scenarios. Returns both mean and min:
       - 'l2'        -> mean balanced L2
       - 'sigma'     -> mean σ-radius (if computed)
-      - 'l2_pre'    -> mean pre-image L2 (legacy)
+      - 'l2_pre'    -> mean pre-image L2
       - 'l2_min'    -> min balanced L2
       - 'sigma_min' -> min σ-radius (if computed)
     """

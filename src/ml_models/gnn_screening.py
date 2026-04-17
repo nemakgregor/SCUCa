@@ -41,15 +41,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-
-try:
-    from torch_geometric.data import Data as GeoData
-    from torch_geometric.loader import DataLoader
-    from torch_geometric.nn import SAGEConv
-
-    HAVE_PYG = True
-except ImportError:
-    HAVE_PYG = False
+from torch_geometric.data import Data as GeoData
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import SAGEConv
 
 import networkx as nx
 
@@ -230,11 +224,6 @@ class GNNLineScreener:
         self.model: Optional[_LineSAGE] = None
 
     def _build_dataset(self, restrict_to_names: Optional[set] = None) -> Optional[List[GeoData]]:
-        if not HAVE_PYG:
-            raise ImportError(
-                "[gnn_screen] torch-geometric is required for GNN screening. "
-                "Install with: pip install torch-geometric"
-            )
         outs = _list_outputs(self.case)
         if not outs:
             return None
@@ -291,11 +280,21 @@ class GNNLineScreener:
             return None
         torch.manual_seed(seed)
         np.random.seed(seed)
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         in_dim = data_list[0].x.shape[1]
         model = _LineSAGE(in_dim=in_dim, hidden=64)
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         loss_fn = nn.BCELoss()
-        loader = DataLoader(data_list, batch_size=batch_size, shuffle=True)
+        generator = torch.Generator().manual_seed(seed)
+        loader = DataLoader(
+            data_list,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=generator,
+        )
         model.train()
         for e in range(epochs):
             tot = 0.0
@@ -320,19 +319,16 @@ class GNNLineScreener:
         if self.model is not None:
             return True
         if self.model_path.exists():
-            try:
-                meta = (
-                    json.loads(self.meta_path.read_text(encoding="utf-8"))
-                    if self.meta_path.exists()
-                    else {}
-                )
-                in_dim = int(meta.get("in_dim", 7))
-                m = _LineSAGE(in_dim=in_dim, hidden=64)
-                m.load_state_dict(torch.load(self.model_path, map_location="cpu"))
-                self.model = m.eval()
-                return True
-            except Exception:
-                return False
+            meta = (
+                json.loads(self.meta_path.read_text(encoding="utf-8"))
+                if self.meta_path.exists()
+                else {}
+            )
+            in_dim = int(meta.get("in_dim", 7))
+            m = _LineSAGE(in_dim=in_dim, hidden=64)
+            m.load_state_dict(torch.load(self.model_path, map_location="cpu"))
+            self.model = m.eval()
+            return True
         return False
 
     def _predict_scores_for_instance(self, sc) -> Dict[str, float]:

@@ -1,6 +1,7 @@
 from typing import Union, Sequence, Optional
 import gzip
 import json
+import os
 import re
 from pathlib import Path
 
@@ -106,10 +107,158 @@ def _read_scenario(path: str, quiet: bool = False) -> UnitCommitmentScenario:
     return from_json(raw, quiet=quiet)
 
 
+class _JsonTextStream:
+    def __init__(self, fh, chunk_size: int = 1 << 20):
+        self._fh = fh
+        self._chunk_size = chunk_size
+        self._buf = ""
+        self._pos = 0
+        self._eof = False
+
+    def _compact(self) -> None:
+        if self._pos > 0:
+            self._buf = self._buf[self._pos :]
+            self._pos = 0
+
+    def _fill(self, need: int = 1) -> None:
+        while len(self._buf) - self._pos < need and not self._eof:
+            chunk = self._fh.read(self._chunk_size)
+            if not chunk:
+                self._eof = True
+                break
+            if self._pos > 0 and (self._pos > (1 << 20) or self._pos > len(self._buf) // 2):
+                self._compact()
+            self._buf += chunk
+
+    def peek(self) -> str:
+        self._fill(1)
+        if self._pos >= len(self._buf):
+            return ""
+        return self._buf[self._pos]
+
+    def get(self) -> str:
+        self._fill(1)
+        if self._pos >= len(self._buf):
+            raise EOFError("Unexpected end of JSON stream.")
+        ch = self._buf[self._pos]
+        self._pos += 1
+        return ch
+
+    def skip_ws(self) -> None:
+        while True:
+            ch = self.peek()
+            if not ch or not ch.isspace():
+                return
+            self._pos += 1
+
+
+def _read_json_string_text(stream: _JsonTextStream) -> str:
+    if stream.get() != '"':
+        raise ValueError("Expected JSON string.")
+    parts = ['"']
+    escaped = False
+    while True:
+        ch = stream.get()
+        parts.append(ch)
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            return "".join(parts)
+
+
+def _read_json_value_text(stream: _JsonTextStream) -> str:
+    first = stream.peek()
+    if not first:
+        raise EOFError("Unexpected end of JSON stream while reading value.")
+    if first == '"':
+        return _read_json_string_text(stream)
+    if first in "{[":
+        parts = []
+        depth = 0
+        in_string = False
+        escaped = False
+        while True:
+            ch = stream.get()
+            parts.append(ch)
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+                if depth == 0:
+                    return "".join(parts)
+        raise EOFError("Unbalanced JSON structure.")
+    parts = []
+    while True:
+        ch = stream.peek()
+        if not ch or ch.isspace() or ch in ",}]":
+            return "".join(parts)
+        parts.append(stream.get())
+
+
+def _read_large_json_object(fh) -> dict:
+    stream = _JsonTextStream(fh)
+    stream.skip_ws()
+    if stream.get() != "{":
+        raise ValueError("Expected top-level JSON object.")
+    result = {}
+    stream.skip_ws()
+    if stream.peek() == "}":
+        stream.get()
+        return result
+    while True:
+        stream.skip_ws()
+        key = json.loads(_read_json_string_text(stream))
+        stream.skip_ws()
+        if stream.get() != ":":
+            raise ValueError("Expected ':' after JSON object key.")
+        stream.skip_ws()
+        result[key] = json.loads(_read_json_value_text(stream))
+        stream.skip_ws()
+        sep = stream.get()
+        if sep == "}":
+            break
+        if sep != ",":
+            raise ValueError(f"Expected ',' or '}}' in top-level JSON object, got {sep!r}.")
+    stream.skip_ws()
+    if stream.peek():
+        raise ValueError("Unexpected trailing data after JSON object.")
+    return result
+
+
 def _read_json(path: str) -> dict:
     """Open JSON or JSON.GZ transparently."""
+    size_bytes = os.path.getsize(path)
+    use_streaming = size_bytes >= 32 * (1 << 20)
     if path.endswith(".gz"):
         with gzip.open(path, "rt", encoding="utf-8") as fh:
-            return json.load(fh)
+            if use_streaming:
+                return _read_large_json_object(fh)
+            try:
+                return json.load(fh)
+            except MemoryError:
+                fh.close()
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            return _read_large_json_object(fh)
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        if use_streaming:
+            return _read_large_json_object(fh)
+        try:
+            return json.load(fh)
+        except MemoryError:
+            fh.close()
+    with open(path, "r", encoding="utf-8") as fh:
+        return _read_large_json_object(fh)

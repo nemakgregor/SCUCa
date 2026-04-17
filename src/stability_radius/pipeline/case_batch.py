@@ -62,7 +62,7 @@ def compute_baseline_from_samples(P_samples: np.ndarray) -> np.ndarray:
 
 
 def _pick_slack_from_pbar(nodes: List[str], pbar: np.ndarray) -> str:
-    # Choose bus with maximum positive injection; fallback to first
+    # Choose bus with maximum positive injection; otherwise use the first
     idx = int(np.argmax(pbar))
     if pbar[idx] > 0:
         return nodes[idx]

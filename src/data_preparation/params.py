@@ -16,7 +16,7 @@ class DataParams:
       presence of key fields and will raise if missing. Defaults listed here are
       therefore either:
         • documentation of expected scales, or
-        • actual fallback values when the loader allows omission.
+        • actual default values when the loader allows omission.
     """
 
     # Remote sources

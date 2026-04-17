@@ -7,11 +7,7 @@ from typing import Dict, Optional, Set, Tuple
 
 from src.data_preparation.data_structure import UnitCommitmentScenario
 from src.ml_models.commitment_hints import CommitmentHints
-
-try:
-    from src.ml_models.gnn_screening import GNNLineScreener
-except Exception:
-    GNNLineScreener = None
+from src.ml_models.gnn_screening import GNNLineScreener
 
 
 @dataclass
@@ -42,49 +38,55 @@ class STReductionProvider:
     def __init__(self, case_folder: str):
         self.case = case_folder.strip().strip("/\\").replace("\\", "/")
         self.commit = CommitmentHints(case_folder=self.case)
-        self.gnn = GNNLineScreener(case_folder=self.case) if GNNLineScreener else None
+        self.gnn = GNNLineScreener(case_folder=self.case)
 
     def ensure_trained(self) -> Dict[str, bool]:
-        out = {"commit": False, "gnn": False}
-        try:
-            out["commit"] = bool(self.commit.ensure_trained())
-        except Exception:
-            out["commit"] = False
-        if self.gnn is not None:
-            try:
-                out["gnn"] = bool(self.gnn.ensure_trained())
-            except Exception:
-                out["gnn"] = False
-        return out
+        return {
+            "commit": bool(self.commit.ensure_trained()),
+            "gnn": bool(self.gnn.ensure_trained()),
+        }
 
     def _predict_commit_probs(
         self, scenario: UnitCommitmentScenario, instance_name: str
     ) -> Dict[Tuple[str, int], float]:
-        try:
-            if not self.commit.ensure_trained() or self.commit.model is None:
-                return {}
-            X, keys = self.commit._features_for_instance(scenario, instance_name)
-            if X.shape[0] == 0:
-                return {}
-            prob = self.commit.model.predict_proba(X)
-            return {(gname, int(t)): float(p) for (gname, t), p in zip(keys, prob)}
-        except Exception:
+        if not self.commit.ensure_trained():
             return {}
+        X, keys = self.commit._features_for_instance(scenario, instance_name)
+        if X.shape[0] == 0:
+            return {}
+        if self.commit.constant_target is not None:
+            prob = [float(self.commit.constant_target)] * X.shape[0]
+        elif self.commit.model is not None:
+            raw_prob = self.commit.model.predict_proba(X)
+            prob_arr = getattr(raw_prob, "tolist", lambda: raw_prob)()
+            if len(prob_arr) != len(keys):
+                raise ValueError(
+                    f"Commitment probability length mismatch for {instance_name}: "
+                    f"{len(prob_arr)} predictions vs {len(keys)} keys."
+                )
+            prob = []
+            for row in prob_arr:
+                if isinstance(row, (list, tuple)):
+                    if len(row) < 2:
+                        raise ValueError(
+                            f"Unexpected probability row shape for {instance_name}: {row!r}"
+                        )
+                    prob.append(float(row[1]))
+                else:
+                    prob.append(float(row))
+        else:
+            return {}
+        return {(gname, int(t)): float(p) for (gname, t), p in zip(keys, prob)}
 
     def _predict_line_scores(
         self, scenario: UnitCommitmentScenario
     ) -> Dict[str, float]:
-        if self.gnn is None:
+        if not self.gnn.ensure_trained():
             return {}
-        try:
-            if not self.gnn.ensure_trained():
-                return {}
-            return {
-                str(name): float(score)
-                for name, score in self.gnn._predict_scores_for_instance(scenario).items()
-            }
-        except Exception:
-            return {}
+        return {
+            str(name): float(score)
+            for name, score in self.gnn._predict_scores_for_instance(scenario).items()
+        }
 
     def build_profile(
         self,

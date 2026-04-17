@@ -18,6 +18,9 @@ from src.optimization_model.solver.scuc.constraints import (
     line_flow_ptdf,
 )
 from src.optimization_model.solver.scuc.constraints import (
+    line_flow_dc,
+)
+from src.optimization_model.solver.scuc.constraints import (
     line_limits,
 )
 from src.optimization_model.solver.scuc.constraints import (

@@ -82,7 +82,7 @@ def main():
         if not idx_path:
             print(" no data (missing outputs) -> skipped")
             continue
-        trained, cov = wsp.ensure_trained(cf, allow_build_if_missing=False)
+        trained, cov = wsp.ensure_trained(cf)
         status = "TRAINED" if trained else "NOT TRAINED"
         print(f" done. coverage={cov:.3f}, status={status}, index={idx_path}")
         ok_count += 1

@@ -1,5 +1,5 @@
 """
-Minimal, publication-focused table generation.
+All-mode, publication-friendly table generation.
 
 Generates only relevant tables:
   - results/tables/optimality_by_case.tex
@@ -15,24 +15,10 @@ import pandas as pd
 
 SUMMARY = Path("results") / "summary.csv"
 MERGED = Path("results") / "merged_results.csv"
+MODE_SPEED = Path("results") / "mode_speed_stats.csv"
 OUT_DIR = Path("results") / "tables"
 RAW_BASELINE_MODE = "RAW"
 HEURISTIC_MODES = {"SHRINK+LAZY"}
-
-# Keep only publication-relevant methods for clear tables.
-FOCUS_MODES = [
-    "RAW",
-    "WARM",
-    "WARM+LAZY",
-    "WARM+PRUNE-0.10",
-    "WARM+LPSCREEN-0.10",
-    "WARM+SR+LAZY",
-    "ACTIVESET",
-    "ACTIVESET+LAZY",
-    "STREDUCE",
-    "STREDUCE+LAZY",
-    "SHRINK+LAZY",
-]
 
 
 def _ensure() -> None:
@@ -70,11 +56,6 @@ def _mode_display(mode: str) -> str:
     return rf"{m}$^\dagger$" if _mode_exactness(m) == "heuristic" else m
 
 
-def _present_focus_modes(values: pd.Series) -> list[str]:
-    present = set(values.dropna().astype(str))
-    return [m for m in FOCUS_MODES if m in present]
-
-
 def _case_label(case_folder: str) -> str:
     return str(case_folder).split("/")[-1]
 
@@ -83,15 +64,39 @@ def _tabularx_spec(num_case_cols: int) -> str:
     return "|l||" + "|".join(["X"] * num_case_cols) + "|"
 
 
-def _fmt_ci(m, lo, hi, fmt="{:.2f}") -> str:
-    if np.isnan(m) or np.isnan(lo) or np.isnan(hi):
+def _ordered_modes(
+    present_modes: list[str] | set[str],
+    mode_speed: pd.DataFrame | None = None,
+) -> list[str]:
+    present = {str(m) for m in present_modes if pd.notna(m)}
+    ordered: list[str] = []
+    if RAW_BASELINE_MODE in present:
+        ordered.append(RAW_BASELINE_MODE)
+    if mode_speed is not None and not mode_speed.empty and "mode" in mode_speed.columns:
+        ms = mode_speed.copy()
+        if "mean_runtime_ratio" in ms.columns:
+            ms["mean_runtime_ratio"] = pd.to_numeric(
+                ms["mean_runtime_ratio"], errors="coerce"
+            )
+            ms = ms.sort_values(["mean_runtime_ratio", "mode"], na_position="last")
+        for mode in ms["mode"].astype(str):
+            if mode in present and mode not in ordered:
+                ordered.append(mode)
+    for mode in sorted(present):
+        if mode not in ordered:
+            ordered.append(mode)
+    return ordered
+
+
+def _fmt_num(x, fmt="{:.2f}") -> str:
+    if not np.isfinite(x):
         return "--"
-    return f"{fmt.format(m)} ({fmt.format(lo)}--{fmt.format(hi)})"
+    return fmt.format(float(x))
 
 
-def optimality_by_case(merged: pd.DataFrame) -> str | None:
+def optimality_by_case(merged: pd.DataFrame, mode_speed: pd.DataFrame) -> str | None:
     cases = sorted(merged["case_folder"].dropna().astype(str).unique())
-    modes = _present_focus_modes(merged["mode"])
+    modes = _ordered_modes(merged["mode"].dropna().astype(str).unique(), mode_speed=mode_speed)
     if not cases or not modes:
         return None
 
@@ -117,12 +122,15 @@ def optimality_by_case(merged: pd.DataFrame) -> str | None:
             infeas = int(
                 status.isin(["INFEASIBLE", "INF_OR_UNBD", "INFEASIBLE_OR_UNBOUNDED"]).sum()
             )
-            other = max(total - opt - infeas, 0)
+            tl = int(status.isin(["TIME_LIMIT", "SUBOPTIMAL"]).sum())
             row.append(
-                f"{100.0 * opt / total:.0f}/{100.0 * infeas / total:.0f}/{100.0 * other / total:.0f}"
+                f"{100.0 * opt / total:.0f}/{100.0 * tl / total:.0f}/{100.0 * infeas / total:.0f}"
             )
         tex.append(" & ".join(row) + r" \\ \hline")
 
+    tex.append(
+        rf"\multicolumn{{{1 + len(cases)}}}{{l}}{{\footnotesize Entries are Optimal / TimeLimit-or-Suboptimal / Infeasible shares in percent.}} \\ \hline"
+    )
     if any(_mode_exactness(m) == "heuristic" for m in modes):
         tex.append(
             rf"\multicolumn{{{1 + len(cases)}}}{{l}}{{\footnotesize $^\dagger$ Heuristic mode (not exact MILP-equivalent).}} \\ \hline"
@@ -134,9 +142,9 @@ def optimality_by_case(merged: pd.DataFrame) -> str | None:
     return out.name
 
 
-def speedup_by_case(summary: pd.DataFrame) -> str | None:
+def speedup_by_case(summary: pd.DataFrame, mode_speed: pd.DataFrame) -> str | None:
     cases = sorted(summary["case_folder"].dropna().astype(str).unique())
-    modes = _present_focus_modes(summary["mode"])
+    modes = _ordered_modes(summary["mode"].dropna().astype(str).unique(), mode_speed=mode_speed)
     if not cases or not modes:
         return None
 
@@ -171,41 +179,65 @@ def speedup_by_case(summary: pd.DataFrame) -> str | None:
     return out.name
 
 
-def runtime_selected(summary: pd.DataFrame) -> str | None:
-    modes = _present_focus_modes(summary["mode"])
-    if not modes:
+def runtime_selected(mode_speed: pd.DataFrame) -> str | None:
+    req = {"mode", "mean_runtime_ratio", "std_runtime_ratio", "N"}
+    if not req.issubset(set(mode_speed.columns)):
         return None
-    cases = sorted(summary["case_folder"].dropna().astype(str).unique())
-    if not cases:
+
+    d = mode_speed.copy()
+    d["mean_runtime_ratio"] = pd.to_numeric(d["mean_runtime_ratio"], errors="coerce")
+    d["std_runtime_ratio"] = pd.to_numeric(d["std_runtime_ratio"], errors="coerce")
+    d["success_rate_strict"] = pd.to_numeric(
+        d.get("success_rate_strict", np.nan), errors="coerce"
+    )
+    d["method_exactness"] = d.get("method_exactness", "exact").fillna("exact")
+    if d.empty:
         return None
+
+    d = pd.concat(
+        [
+            pd.DataFrame(
+                [
+                    {
+                        "mode": RAW_BASELINE_MODE,
+                        "mean_runtime_ratio": 1.0,
+                        "std_runtime_ratio": 0.0,
+                        "N": int(pd.to_numeric(d["N"], errors="coerce").max())
+                        if "N" in d.columns and not d.empty
+                        else 0,
+                        "success_rate_strict": 1.0,
+                        "method_exactness": "exact",
+                    }
+                ]
+            ),
+            d,
+        ],
+        ignore_index=True,
+    )
+    d = d.drop_duplicates(subset=["mode"], keep="first")
+    d = d.sort_values(["mean_runtime_ratio", "mode"], na_position="last").reset_index(drop=True)
 
     tex = []
+    tex.append(r"\begin{tabularx}{0.98\textwidth}{|l||X|X|X|X|}\hline")
     tex.append(
-        rf"\begin{{tabularx}}{{0.98\textwidth}}{{{_tabularx_spec(len(modes))}}}\hline"
+        r"\textbf{Mode} & \textbf{Type} & \textbf{Mean Runtime Ratio vs RAW} & \textbf{Std} & \textbf{Strict Success} \\ \hline \hline"
     )
-    header = " & ".join([r"\textbf{Case}"] + [rf"\textbf{{{_mode_display(m)}}}" for m in modes])
-    tex.append(header + r" \\ \hline \hline")
-
-    for case in cases:
-        row = [_case_label(case)]
-        for mode in modes:
-            s = summary[(summary["case_folder"] == case) & (summary["mode"] == mode)]
-            if s.empty:
-                row.append("--")
-                continue
-            row.append(
-                _fmt_ci(
-                    pd.to_numeric(s["runtime_median"], errors="coerce").iloc[0],
-                    pd.to_numeric(s["runtime_CI95_lo"], errors="coerce").iloc[0],
-                    pd.to_numeric(s["runtime_CI95_hi"], errors="coerce").iloc[0],
-                    "{:.2f}",
-                )
-            )
-        tex.append(" & ".join(row) + r" \\ \hline")
-
-    if any(_mode_exactness(m) == "heuristic" for m in modes):
+    for _, row in d.iterrows():
         tex.append(
-            rf"\multicolumn{{{1 + len(modes)}}}{{l}}{{\footnotesize $^\dagger$ Heuristic mode (not exact MILP-equivalent).}} \\ \hline"
+            " & ".join(
+                [
+                    _mode_display(str(row["mode"])),
+                    str(row.get("method_exactness", "exact")),
+                    _fmt_num(float(row["mean_runtime_ratio"]), "{:.3f}"),
+                    _fmt_num(float(row["std_runtime_ratio"]), "{:.3f}"),
+                    _fmt_num(100.0 * float(row.get("success_rate_strict", np.nan)), "{:.0f}") + r"\%",
+                ]
+            )
+            + r" \\ \hline"
+        )
+    if any(_mode_exactness(m) == "heuristic" for m in d["mode"].astype(str)):
+        tex.append(
+            r"\multicolumn{5}{l}{\footnotesize $^\dagger$ Heuristic mode (not exact MILP-equivalent).} \\ \hline"
         )
     tex.append(r"\end{tabularx}")
 
@@ -216,15 +248,19 @@ def runtime_selected(summary: pd.DataFrame) -> str | None:
 
 def main() -> None:
     _ensure()
-    if not SUMMARY.is_file() or not MERGED.is_file():
+    if not SUMMARY.is_file() or not MERGED.is_file() or not MODE_SPEED.is_file():
         raise FileNotFoundError("Run analysis.py first.")
 
     summary = pd.read_csv(SUMMARY)
     merged = _normalize_runtime_frame(pd.read_csv(MERGED))
+    mode_speed = pd.read_csv(MODE_SPEED)
 
     generated = set()
-    for fn in (optimality_by_case, speedup_by_case, runtime_selected):
-        out = fn(merged if fn is optimality_by_case else summary)
+    for out in (
+        optimality_by_case(merged, mode_speed),
+        speedup_by_case(summary, mode_speed),
+        runtime_selected(mode_speed),
+    ):
         if out:
             generated.add(out)
 

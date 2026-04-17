@@ -202,7 +202,7 @@ class RedundancyProvider:
         """
         case_folder = _case_folder_from_instance(instance_name)
         if not self._index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._index:
             return None
 
@@ -411,7 +411,7 @@ class RedundancyProvider:
                 continue
             instance_name = self._dataset_name_from_output(out_path)
             feats = self._extract_features_from_output(out)
-            # Fallback: derive from input JSON if not present in output
+            # Derive from input JSON if not present in output
             if not feats:
                 in_path = (self.base_input / (instance_name + ".json.gz")).resolve()
                 sys_load = _load_input_system_load(in_path)
@@ -454,16 +454,11 @@ class RedundancyProvider:
             return None
         return self._save_index_file(cf)
 
-    def ensure_trained(
-        self, case_folder: Optional[str] = None, allow_build_if_missing: bool = True
-    ) -> Tuple[bool, float]:
+    def ensure_trained(self, case_folder: Optional[str] = None) -> Tuple[bool, float]:
         cf = case_folder or self.case_folder
         if not cf:
             return False, 0.0
         if self._load_index_file(cf):
-            return (self._available, self._coverage)
-        if allow_build_if_missing:
-            self._build_index(cf)
             return (self._available, self._coverage)
         return False, 0.0
 
@@ -656,7 +651,7 @@ class RedundancyProvider:
         """
         case_folder = _case_folder_from_instance(instance_name)
         if not self._index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._index:
             return None
 

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -84,5 +85,10 @@ def save_solution_as_json(
         "network": sol.get("network", {}),
     }
 
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(json.dumps(payload, indent=2))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, out_path)
     return out_path

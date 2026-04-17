@@ -95,7 +95,7 @@ def minimal_norm_radius_l2_preimage(
     H_full: np.ndarray, P: np.ndarray, margins: np.ndarray
 ) -> np.ndarray:
     """
-    Pre-image L2 minimal-norm radius (legacy):
+    Pre-image L2 minimal-norm radius:
     For each line ℓ, r_ℓ = margin_ℓ / ||g_ℓ||_2, where g_ℓ = row_ℓ(H_full P).
     This minimizes ||δp|| before balancing (δp_bal = P δp).
     """
@@ -215,7 +215,7 @@ def compute_line_radii(
     - returns radii as dicts:
       {
         "l2": balanced L2 radius,
-        "l2_pre": pre-image L2 radius (legacy; optional),
+        "l2_pre": pre-image L2 radius (optional),
         "metric": metric-weighted pre-image radius (optional),
         "sigma": σ-radius (optional)
       }
@@ -240,7 +240,7 @@ def compute_line_radii(
     r_l2_bal = minimal_norm_radius_l2_balanced(H_full, margins)
     out["l2"] = dict(zip(edges, r_l2_bal))
 
-    # Pre-image L2 (legacy)
+    # Pre-image L2
     r_l2_pre = minimal_norm_radius_l2_preimage(H_full, P, margins)
     out["l2_pre"] = dict(zip(edges, r_l2_pre))
 

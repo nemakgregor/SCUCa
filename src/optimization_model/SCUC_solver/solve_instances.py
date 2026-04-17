@@ -125,7 +125,7 @@ def list_local_cached_instances(
     include_filters: Optional[List[str]] = None,
 ) -> List[str]:
     """
-    Fallback: list locally cached .json.gz under src/data/input and return dataset
+    List locally cached .json.gz under src/data/input and return dataset
     names without extension, filtered by include_filters if provided.
     """
     base = DataParams._CACHE.resolve()
