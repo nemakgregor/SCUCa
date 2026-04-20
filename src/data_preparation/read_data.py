@@ -1,6 +1,7 @@
 from typing import Union, Sequence, Optional
 import gzip
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,9 @@ from src.data_preparation.utils import (
     repair_scenario_names_and_probabilities,
     migrate,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _sanitize_identifier(s: str) -> str:
@@ -41,6 +45,7 @@ def read_benchmark(name: str, *, quiet: bool = False) -> UnitCommitmentInstance:
     url = f"{DataParams.INSTANCES_URL}/{gz_name}"
 
     if not local_path.is_file():
+        logger.info("Missing local instance, downloading: %s", name)
         if not quiet:
             print(f"Downloading  {url}")
         # Hide the download progress bar when quiet=True (experiments mode)
