@@ -119,11 +119,9 @@ class WarmStartProvider:
     Inference: generate_and_save_warm_start() writes a warm JSON capturing a neighbor's
     solution, and apply_warm_start_to_model() sets Start values on the current model.
 
-    New in this version:
-      - generate_and_save_warm_start(..., auto_fix=True) will automatically build a
-        'warm_fixed_<instance>.json' using src.ml_models.fix_warm_start (no Gurobi).
-      - apply_warm_start_to_model(...) now prefers a 'warm_fixed_<instance>.json' file
-        if present, falling back to 'warm_<instance>.json'.
+    This provider stores deterministic warm-start JSON files:
+      - generate_and_save_warm_start(...) writes 'warm_<instance>.json'
+      - apply_warm_start_to_model(...) consumes the same file
     """
 
     def __init__(
@@ -360,16 +358,11 @@ class WarmStartProvider:
             return None
         return self._save_index_file(cf)
 
-    def ensure_trained(
-        self, case_folder: Optional[str] = None, allow_build_if_missing: bool = True
-    ) -> Tuple[bool, float]:
+    def ensure_trained(self, case_folder: Optional[str] = None) -> Tuple[bool, float]:
         cf = case_folder or self.case_folder
         if not cf:
             return False, 0.0
         if self._load_index_file(cf):
-            return (self._available or self._trained), self._coverage
-        if allow_build_if_missing:
-            self._build_index(cf)
             return (self._available or self._trained), self._coverage
         return False, 0.0
 
@@ -396,17 +389,175 @@ class WarmStartProvider:
             return None
         return best_name, best_item, best_dist
 
+    def _k_nearest_neighbors(
+        self,
+        target_feats: List[float],
+        k: int = 5,
+        restrict_to_names: Optional[Set[str]] = None,
+        exclude_names: Optional[Set[str]] = None,
+    ) -> List[Tuple[str, dict, float]]:
+        """Return up to k nearest neighbors sorted by distance."""
+        candidates = []
+        for name, item in self._trained_index.items():
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
+            if exclude_names is not None and name in exclude_names:
+                continue
+            d = _l2(target_feats, item["features"])
+            candidates.append((name, item, d))
+        candidates.sort(key=lambda x: x[2])
+        return candidates[:k]
+
+    def generate_weighted_warm_start(
+        self,
+        instance_name: str,
+        k: int = 5,
+        use_train_index_only: bool = False,
+        exclude_self: bool = True,
+    ) -> Optional[Path]:
+        """
+        Weighted k-NN warm start: blend k nearest neighbors by inverse distance.
+
+        For binary variables (commit): weighted majority vote.
+        For continuous variables (segment_power): distance-weighted average.
+        """
+        case_folder = _case_folder_from_instance(instance_name)
+
+        if not self._trained_index:
+            self.ensure_trained(case_folder)
+        if not self._trained_index:
+            return None
+
+        input_path = (DataParams._CACHE / (instance_name + ".json.gz")).resolve()
+        target_load = _load_input_system_load(input_path)
+        if not target_load:
+            return None
+        target_feats = _zscore([float(x) for x in target_load])
+
+        restrict = self._splits["train"] if use_train_index_only else None
+        exclude = {instance_name} if exclude_self else None
+
+        neighbors = self._k_nearest_neighbors(
+            target_feats, k=k, restrict_to_names=restrict, exclude_names=exclude
+        )
+        if not neighbors:
+            return None
+
+        # Load all neighbor solutions
+        solutions = []
+        weights = []
+        for nn_name, _, nn_dist in neighbors:
+            nn_path = (self.base_output / (nn_name + ".json")).resolve()
+            nn_sol = _load_output_solution(nn_path)
+            if nn_sol is None:
+                continue
+            solutions.append(nn_sol)
+            # Inverse distance weight (add epsilon to avoid division by zero)
+            weights.append(1.0 / max(nn_dist, 1e-9))
+
+        if not solutions:
+            return None
+
+        # Normalize weights
+        w_sum = sum(weights)
+        weights = [w / w_sum for w in weights]
+
+        # Blend generators: weighted majority for commit, weighted average for segments
+        blended_gens = {}
+        all_gen_names = set()
+        for sol in solutions:
+            all_gen_names.update((sol.get("generators", {}) or {}).keys())
+
+        for gname in all_gen_names:
+            # Collect commit lists and segment power lists from each neighbor
+            commit_lists = []
+            seg_lists = []
+            for sol, w in zip(solutions, weights):
+                gsol = (sol.get("generators", {}) or {}).get(gname, {})
+                c = gsol.get("commit", [])
+                s = gsol.get("segment_power", [])
+                commit_lists.append((c, w))
+                seg_lists.append((s, w))
+
+            # Determine T from longest commit list
+            T = max((len(c) for c, _ in commit_lists), default=0)
+            if T == 0:
+                continue
+
+            # Weighted majority vote for commit
+            blended_commit = []
+            for t in range(T):
+                w_on = 0.0
+                w_off = 0.0
+                for c_list, w in commit_lists:
+                    val = float(c_list[t]) if t < len(c_list) else 0.0
+                    if val >= 0.5:
+                        w_on += w
+                    else:
+                        w_off += w
+                blended_commit.append(1 if w_on >= w_off else 0)
+
+            # Weighted average for segment power
+            nS = 0
+            for s_list, _ in seg_lists:
+                if isinstance(s_list, list) and s_list:
+                    if isinstance(s_list[0], list):
+                        nS = max(nS, len(s_list[0]))
+            blended_seg = []
+            for t in range(T):
+                row = [0.0] * nS
+                for s_list, w in seg_lists:
+                    if not isinstance(s_list, list) or t >= len(s_list):
+                        continue
+                    s_row = s_list[t] if isinstance(s_list[t], list) else []
+                    for s in range(min(nS, len(s_row))):
+                        row[s] += float(s_row[s]) * w
+                blended_seg.append(row)
+
+            blended_gens[gname] = {
+                "commit": blended_commit,
+                "segment_power": blended_seg,
+            }
+
+        nn_name_best = neighbors[0][0]
+        nn_dist_best = neighbors[0][2]
+
+        payload = {
+            "instance_name": instance_name,
+            "case_folder": case_folder,
+            "neighbor": nn_name_best,
+            "neighbors_used": len(solutions),
+            "distance": float(nn_dist_best),
+            "coverage": float(self._coverage),
+            "generators": blended_gens,
+            "reserves": {},
+            "network": {},
+        }
+
+        fname = f"warm_{_sanitize_name(instance_name)}.json"
+        out_path = (self.base_warm / fname).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return out_path
+
     def generate_and_save_warm_start(
         self,
         instance_name: str,
         use_train_index_only: bool = False,
         exclude_self: bool = True,
-        auto_fix: bool = True,
+        k: int = 1,
     ) -> Optional[Path]:
+        # Dispatch to weighted k-NN when k > 1
+        if k > 1:
+            return self.generate_weighted_warm_start(
+                instance_name, k=k,
+                use_train_index_only=use_train_index_only,
+                exclude_self=exclude_self,
+            )
         case_folder = _case_folder_from_instance(instance_name)
 
         if not self._trained_index:
-            self.ensure_trained(case_folder, allow_build_if_missing=False)
+            self.ensure_trained(case_folder)
         if not self._trained_index:
             return None
 
@@ -450,17 +601,6 @@ class WarmStartProvider:
         out_path = (self.base_warm / fname).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        # Automatically produce a fixed warm JSON (no Gurobi), if requested
-        if auto_fix:
-            try:
-                from src.ml_models.fix_warm_start import fix_warm_file
-
-                fix_warm_file(instance_name, warm_file=out_path)
-            except Exception as e:
-                # non-fatal: fall back to raw warm if fixer fails
-                print(f"[warm_start] Auto-fix failed for {instance_name}: {e}")
-
         return out_path
 
     @staticmethod
@@ -487,9 +627,8 @@ class WarmStartProvider:
         """
         Set Start on model vars using a warm JSON for 'instance_name'.
 
-        Preference order for input file:
-          1) warm_fixed_<instance>.json (if exists)
-          2) warm_<instance>.json
+        Input file:
+          - warm_<instance>.json
 
         mode:
           - "repair"      -> apply and repair to satisfy easy constraints
@@ -501,20 +640,10 @@ class WarmStartProvider:
         if mode not in ("repair", "commit-only", "as-is"):
             mode = "repair"
 
-        # Prefer fixed warm file if present
         tag = _sanitize_name(instance_name)
-        fixed_path = (self.base_warm / f"warm_fixed_{tag}.json").resolve()
-        if fixed_path.exists():
-            fpath = fixed_path
-        else:
-            fpath = (self.base_warm / f"warm_{tag}.json").resolve()
-            if not fpath.exists():
-                alt = (
-                    self.base_warm / f"warm_{_sanitize_name(scenario.name)}.json"
-                ).resolve()
-                if not alt.exists():
-                    return 0
-                fpath = alt
+        fpath = (self.base_warm / f"warm_{tag}.json").resolve()
+        if not fpath.exists():
+            return 0
 
         try:
             warm = json.loads(fpath.read_text(encoding="utf-8"))
@@ -880,7 +1009,7 @@ class WarmStartProvider:
                 break
             count += 1
             p = self.generate_and_save_warm_start(
-                nm, use_train_index_only=use_train_db, exclude_self=True, auto_fix=True
+                nm, use_train_index_only=use_train_db, exclude_self=True
             )
             out.append((nm, p))
         return out
@@ -916,7 +1045,7 @@ if __name__ == "__main__":
         "--generate-for",
         choices=["train", "val", "test"],
         default=None,
-        help="Generate warm-start files for the chosen split (auto-fix on)",
+        help="Generate warm-start files for the chosen split",
     )
     ap.add_argument(
         "--use-train-db",
@@ -949,7 +1078,7 @@ if __name__ == "__main__":
         else:
             print("No data to build index.")
     else:
-        wsp.ensure_trained(args.case, allow_build_if_missing=True)
+        wsp.ensure_trained(args.case)
 
     if args.report:
         wsp.report_splits()

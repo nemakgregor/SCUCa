@@ -34,13 +34,13 @@ def _val_at(series: Sequence, t: int, default: float = 0.0) -> float:
 
 
 def _infer_line_capacity(
-    line: TransmissionLine, t: int, fallback: float = 1e6
+    line: TransmissionLine, t: int, default_capacity: float = 1e6
 ) -> float:
     cap = _val_at(getattr(line, "normal_limit", None), t, None)
     if cap is None or cap <= 0:
         cap = _val_at(getattr(line, "emergency_limit", None), t, None)
     if cap is None or cap <= 0:
-        cap = fallback
+        cap = default_capacity
     return float(cap)
 
 
@@ -51,7 +51,7 @@ def _reactance_from_susceptance(susceptance: float) -> float:
             return 1.0 / b
     except Exception:
         pass
-    # Fallback reactance
+    # Default reactance
     return 0.1
 
 
@@ -124,7 +124,7 @@ def _pick_slack_bus(
 ) -> str:
     if not bus_names:
         raise ValueError("No buses available to pick a slack bus")
-    # Prefer the bus with maximum positive generation; fallback to smallest index
+    # Prefer the bus with maximum positive generation; otherwise choose smallest index
     best = None
     best_g = -1.0
     for b in bus_names:
@@ -134,7 +134,7 @@ def _pick_slack_bus(
             best = b
     if best is not None and best_g > 0.0:
         return best
-    # Fallback: lowest index
+    # Lowest index
     return min(bus_names, key=lambda x: bus_index_order.get(x, 10**9))
 
 
@@ -144,7 +144,7 @@ def scenario_to_nx_graph(
     choose_slack: Optional[str] = None,
 ) -> Tuple[nx.Graph, str]:
     """
-    Convert a UnitCommitmentScenario at time index t into a NetworkX graph compatible with
+    Convert a UnitCommitmentScenario at time index t into a NetworkX graph used by
     stability_radius power-flow and metrics modules.
 
     Returns (G, slack_bus_name).

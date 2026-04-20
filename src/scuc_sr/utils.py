@@ -53,11 +53,6 @@ def edge_key_str(u: str, v: str) -> str:
     return f"{a}-{b}"
 
 
-def map_line_to_edge_key(line) -> Tuple[str, str]:
-    """Kept for compatibility (tuple return)."""
-    return undirected_key(line.source.name, line.target.name)
-
-
 def aggregate_counts_per_line(
     instances_results: List[Dict],
 ) -> Dict[str, Dict[str, int]]:
@@ -71,7 +66,6 @@ def aggregate_counts_per_line(
       - prune_events_calls, prune_events_pruned
       - prune_line_constraints_added, lazy_line_constraints_added
       - prune_plus_lazy_line_constraints_added
-      (legacy lazy_events_potential/dropped removed for speed)
     """
     agg: Dict[str, Dict[str, int]] = {}
     for item in instances_results:

@@ -708,7 +708,7 @@ def _solve_warm(
 
     try:
         wsp.generate_and_save_warm_start(
-            instance_name, use_train_index_only=True, exclude_self=True, auto_fix=True
+            instance_name, use_train_index_only=True, exclude_self=True
         )
     except Exception:
         pass
@@ -731,8 +731,6 @@ def _solve_warm(
     )
 
     mode = warm_mode.strip().lower()
-    if mode == "fixed":
-        mode = "repair"
     applied = 0
     try:
         applied = wsp.apply_warm_start_to_model(model, sc, instance_name, mode=mode)
@@ -864,8 +862,8 @@ def main():
     )
     ap.add_argument(
         "--warm-mode",
-        choices=["fixed", "commit-only", "as-is"],
-        default="fixed",
+        choices=["repair", "commit-only", "as-is"],
+        default="repair",
         help="Warm-start application mode for evaluation",
     )
     ap.add_argument(
@@ -1033,7 +1031,7 @@ def main():
         split_seed=args.seed,
     )
     wsp.pretrain(force=True)
-    trained, cov = wsp.ensure_trained(case_folder, allow_build_if_missing=False)
+    trained, cov = wsp.ensure_trained(case_folder)
     print(f"- Warm-start index: trained={trained}, coverage={cov:.3f}")
     if not trained:
         print(
@@ -1051,9 +1049,7 @@ def main():
             split_seed=args.seed,
         )
         rc_provider.pretrain(force=True)
-        ok, rc_cov = rc_provider.ensure_trained(
-            case_folder, allow_build_if_missing=False
-        )
+        ok, rc_cov = rc_provider.ensure_trained(case_folder)
         print(f"- Redundancy index: available={ok}, coverage={rc_cov:.3f}")
         if not ok:
             print("Redundancy index not available. Pruning will be OFF.")

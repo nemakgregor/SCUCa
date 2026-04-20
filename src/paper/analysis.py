@@ -8,7 +8,7 @@ What this script does:
   • Objective delta vs RAW baseline (ppm)
   • Per-case/per-mode robust summaries with bootstrap CI
   • Pairwise (within-instance) comparisons vs RAW for all modes (runtime, nodes, etc.)
-  • Effect sizes (WARM+LAZY vs RAW): Hodges–Lehmann median paired difference, rank-biserial correlation
+  • Effect sizes (WARM_LAZY vs RAW): Hodges–Lehmann median paired difference, rank-biserial correlation
   • Success rates (OPTIMAL/SUBOPTIMAL), feasibility rates (violations=OK), MIP gap stats
   • Warm-start and branching-hint utilization summaries
   • PRUNE tau sweep summaries (constraint ratio vs runtime)
@@ -16,6 +16,8 @@ What this script does:
   • NEW: fastest-mode share per case (mode_fastest_share.csv)
   • NEW: per-mode speed ratio (mode over RAW) stats for bar-plots (mode_speed_stats.csv)
   • NEW: per-row flags (with_LAZY/GNN/PRUNE/COMMIT/GRU/BANDIT) for group-wise plots (flags added in merged_results.csv)
+  • NEW: exact vs heuristic method tags (for publication-safe comparisons)
+  • NEW: explicit vs realized contingency ratio fields for hybrid methods
 """
 
 from __future__ import annotations
@@ -23,16 +25,17 @@ from __future__ import annotations
 import glob
 import math
 import os
+import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy.stats import rankdata, wilcoxon
 
 RESULTS_DIR = Path("results")
 RAW_DIR = RESULTS_DIR / "raw_logs"
-OUT_SUMMARY = RESULTS_DIR / "summary.csv"  # legacy (kept)
+OUT_SUMMARY = RESULTS_DIR / "summary.csv"
 OUT_MERGED = RESULTS_DIR / "merged_results.csv"
 OUT_PAIRS = RESULTS_DIR / "pairs.csv"
 OUT_PAIRS_ALL = RESULTS_DIR / "pairs_all.csv"
@@ -41,6 +44,23 @@ OUT_SUMMARY_EXT = RESULTS_DIR / "summary_extended.csv"
 OUT_EFFECTS_WLZ = RESULTS_DIR / "effects_wlz_vs_raw.csv"
 OUT_OVERALL = RESULTS_DIR / "overall_summary.csv"
 OUT_MODE_SPEED = RESULTS_DIR / "mode_speed_stats.csv"  # NEW: for bar-plot speed ratios
+RAW_BASELINE_MODE = "RAW"
+HEURISTIC_MODES = {"SHRINK+LAZY"}
+
+
+def _mode_exactness(mode: str) -> str:
+    m = str(mode).upper()
+    if m in HEURISTIC_MODES:
+        return "heuristic"
+    return "exact"
+
+
+def _runtime_col(df: pd.DataFrame) -> str:
+    if "runtime_report_sec" in df.columns:
+        return "runtime_report_sec"
+    if "wall_sec" in df.columns:
+        return "wall_sec"
+    return "runtime_sec"
 
 
 def _read_all_logs() -> pd.DataFrame:
@@ -50,8 +70,15 @@ def _read_all_logs() -> pd.DataFrame:
     dfs = []
     for f in files:
         df = pd.read_csv(f)
+        if df.empty:
+            continue
         df["logfile"] = os.path.basename(f)
         dfs.append(df)
+    if not dfs:
+        raise FileNotFoundError(
+            f"All discovered log CSVs in {RAW_DIR} were empty. "
+            f"Run experiments.py first or remove header-only logs."
+        )
     data = pd.concat(dfs, ignore_index=True)
 
     # Ensure correct dtypes
@@ -70,7 +97,29 @@ def _read_all_logs() -> pd.DataFrame:
         "constr_total_cont",
         "constr_kept_cont",
         "constr_ratio_cont",
+        "constr_ratio_cont_explicit",
+        "constr_realized_cont",
+        "constr_ratio_cont_realized",
         "wall_sec",
+        "runtime_report_sec",
+        "screen_setup_sec",
+        "screen_monitored_lines",
+        "explicit_added_cont",
+        "lazy_added_cont",
+        "active_set_iters",
+        "active_set_added",
+        "active_set_dropped",
+        "shrink_window_count",
+        "shrink_window_size",
+        "shrink_overlap",
+        "fixed_commit_vars",
+        "fixed_commit_on",
+        "fixed_commit_off",
+        "st_kept_line_pairs",
+        "st_kept_gen_pairs",
+        "st_used_commit_model",
+        "st_used_gnn_model",
+        "st_used_gru_model",
         "mip_gap",
         "max_constraint_residual",
         "objective_inconsistency",
@@ -79,8 +128,20 @@ def _read_all_logs() -> pd.DataFrame:
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
 
+    if "mode" not in data.columns:
+        if "mode_id" in data.columns:
+            data["mode"] = data["mode_id"].astype(str)
+        else:
+            raise KeyError("Missing required column 'mode' (or 'mode_id').")
+    if "timestamp" not in data.columns:
+        if "timestamp_utc" in data.columns:
+            data["timestamp"] = data["timestamp_utc"].astype(str)
+        else:
+            raise KeyError("Missing required column 'timestamp' (or 'timestamp_utc').")
+
     # Standard categorical/text cols
     for col in [
+        "timestamp",
         "case_folder",
         "mode",
         "instance_name",
@@ -92,23 +153,75 @@ def _read_all_logs() -> pd.DataFrame:
             data[col] = ""
         data[col] = data[col].astype(str)
 
+    data["_timestamp_dt"] = pd.to_datetime(data["timestamp"], errors="coerce", utc=True)
+    data["_row_order"] = np.arange(len(data), dtype=int)
+
+    if "runtime_report_sec" not in data.columns:
+        data["runtime_report_sec"] = np.nan
+    data["runtime_report_sec"] = pd.to_numeric(
+        data["runtime_report_sec"], errors="coerce"
+    )
+    if "wall_sec" in data.columns:
+        data["runtime_report_sec"] = data["runtime_report_sec"].fillna(
+            pd.to_numeric(data["wall_sec"], errors="coerce")
+        )
+    if "runtime_sec" in data.columns:
+        data["runtime_report_sec"] = data["runtime_report_sec"].fillna(
+            pd.to_numeric(data["runtime_sec"], errors="coerce")
+        )
+
+    if "constr_ratio_cont_explicit" not in data.columns:
+        data["constr_ratio_cont_explicit"] = np.nan
+    if "constr_ratio_cont_realized" not in data.columns:
+        data["constr_ratio_cont_realized"] = np.nan
+    if "constr_realized_cont" not in data.columns:
+        data["constr_realized_cont"] = np.nan
+    if "method_exactness" not in data.columns:
+        data["method_exactness"] = ""
+
     # Normalize mode casing a bit
     data["mode_clean"] = data["mode"].str.upper()
+    exactness_from_mode = data["mode_clean"].apply(_mode_exactness)
+    data["method_exactness"] = data["method_exactness"].astype(str).str.lower().str.strip()
+    data.loc[
+        ~data["method_exactness"].isin(["exact", "heuristic"]), "method_exactness"
+    ] = exactness_from_mode.loc[
+        ~data["method_exactness"].isin(["exact", "heuristic"])
+    ]
 
     # Add technique flags for grouping/plots
     data["with_LAZY"] = data["mode"].str.contains("LAZY", case=False, na=False)
     data["with_PRUNE"] = data["mode"].str.contains("PRUNE", case=False, na=False)
+    data["with_LPSCREEN"] = data["mode"].str.contains("LPSCREEN", case=False, na=False)
+    data["with_SR"] = data["mode"].str.contains(
+        r"\+SR(?:\+|$)", case=False, na=False, regex=True
+    )
+    data["with_ACTIVESET"] = data["mode"].str.contains("ACTIVESET", case=False, na=False)
+    data["with_SHRINK"] = data["mode"].str.contains("SHRINK", case=False, na=False)
+    data["with_STREDUCE"] = data["mode"].str.contains("STREDUCE", case=False, na=False)
     data["with_GNN"] = data["mode"].str.contains("GNN", case=False, na=False)
     data["with_COMMIT"] = data["mode"].str.contains("COMMIT", case=False, na=False)
     data["with_GRU"] = data["mode"].str.contains("GRU", case=False, na=False)
     data["with_BANDIT"] = data["mode"].str.contains("BANDIT", case=False, na=False)
+    data["is_heuristic_method"] = data["method_exactness"] == "heuristic"
+    data["is_exact_method"] = data["method_exactness"] == "exact"
+    data["is_raw_baseline"] = data["mode_clean"] == RAW_BASELINE_MODE
+
+    # Keep the latest row per (case, instance, mode) to avoid double counting reruns.
+    data = (
+        data.sort_values(["_timestamp_dt", "logfile", "_row_order"], kind="stable")
+        .groupby(["case_folder", "instance_name", "mode"], as_index=False, sort=False)
+        .tail(1)
+        .copy()
+    )
+    data = data.drop(columns=["_timestamp_dt", "_row_order"], errors="ignore")
 
     return data
 
 
 def _compute_obj_ppm_vs_raw(df: pd.DataFrame) -> pd.DataFrame:
     # For each instance_name, get RAW obj as baseline
-    raw = df[df["mode_clean"].str.startswith("RAW")][
+    raw = df[df["mode_clean"] == RAW_BASELINE_MODE][
         ["instance_name", "obj_val"]
     ].copy()
     raw = raw.rename(columns={"obj_val": "obj_raw"})
@@ -143,6 +256,15 @@ def _bootstrap_ci95_median(
     return float(lo), float(hi)
 
 
+def _nanmedian_safe(x: np.ndarray) -> float:
+    arr = np.asarray(x, dtype=float)
+    if arr.size == 0:
+        return np.nan
+    if not np.isfinite(arr).any():
+        return np.nan
+    return float(np.nanmedian(arr))
+
+
 def _iqr(x: np.ndarray) -> float:
     x = x[~np.isnan(x)]
     if x.size == 0:
@@ -163,20 +285,21 @@ def _pair_with_raw(df: pd.DataFrame) -> pd.DataFrame:
       - final_to_root_ratio = mode_num_constrs_final / mode_num_constrs_root
     """
     rows = []
+    runtime_col = _runtime_col(df)
     for (case, inst), g in df.groupby(["case_folder", "instance_name"]):
-        g_raw = g[g["mode_clean"].str.startswith("RAW")]
+        g_raw = g[g["mode_clean"] == RAW_BASELINE_MODE]
         if g_raw.empty:
             continue
         raw = g_raw.iloc[0]
-        raw_rt = float(raw.get("runtime_sec", np.nan))
+        raw_rt = float(raw.get(runtime_col, np.nan))
         raw_nodes = float(raw.get("nodes", np.nan))
         raw_mem = float(raw.get("peak_memory_gb", np.nan))
         raw_root = float(raw.get("num_constrs_root", np.nan))
         for _, r in g.iterrows():
             mode = r["mode"]
-            if str(mode).upper().startswith("RAW"):
+            if str(mode).upper() == RAW_BASELINE_MODE:
                 continue
-            rt = float(r.get("runtime_sec", np.nan))
+            rt = float(r.get(runtime_col, np.nan))
             nodes = float(r.get("nodes", np.nan))
             mem = float(r.get("peak_memory_gb", np.nan))
             root = float(r.get("num_constrs_root", np.nan))
@@ -240,63 +363,6 @@ def _pair_with_raw(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _aggregate_basic(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Legacy aggregate (kept for backward compatibility):
-      - per case/mode medians/IQR/CI for runtime, nodes, obj ppm, mem, root_constrs
-    """
-    rows = []
-    for case, g_case in df.groupby("case_folder"):
-        for mode, g_mode in g_case.groupby("mode"):
-            rt = pd.to_numeric(g_mode["runtime_sec"], errors="coerce").to_numpy()
-            nd = pd.to_numeric(g_mode["nodes"], errors="coerce").to_numpy()
-            ppm = pd.to_numeric(g_mode["obj_ppm_vs_raw"], errors="coerce").to_numpy()
-            mem = pd.to_numeric(g_mode["peak_memory_gb"], errors="coerce").to_numpy()
-            ncr = pd.to_numeric(g_mode["num_constrs_root"], errors="coerce").to_numpy()
-
-            def med_iqr_ci(x):
-                return (
-                    float(np.nanmedian(x)),
-                    _iqr(x),
-                    *_bootstrap_ci95_median(x),
-                )
-
-            med_rt, iqr_rt, lo_rt, hi_rt = med_iqr_ci(rt)
-            med_nd, iqr_nd, lo_nd, hi_nd = med_iqr_ci(nd)
-            med_ppm, iqr_ppm, lo_ppm, hi_ppm = med_iqr_ci(ppm)
-            med_mem, iqr_mem, lo_mem, hi_mem = med_iqr_ci(mem)
-            med_ncr, iqr_ncr, lo_ncr, hi_ncr = med_iqr_ci(ncr)
-
-            rows.append(
-                {
-                    "case_folder": case,
-                    "mode": mode,
-                    "N": int(len(g_mode)),
-                    "runtime_median": med_rt,
-                    "runtime_IQR": iqr_rt,
-                    "runtime_CI95_lo": lo_rt,
-                    "runtime_CI95_hi": hi_rt,
-                    "nodes_median": med_nd,
-                    "nodes_IQR": iqr_nd,
-                    "nodes_CI95_lo": lo_nd,
-                    "nodes_CI95_hi": hi_nd,
-                    "obj_ppm_median": med_ppm,
-                    "obj_ppm_IQR": iqr_ppm,
-                    "obj_ppm_CI95_lo": lo_ppm,
-                    "obj_ppm_CI95_hi": hi_ppm,
-                    "mem_gb_median": med_mem,
-                    "mem_gb_IQR": iqr_mem,
-                    "mem_gb_CI95_lo": lo_mem,
-                    "mem_gb_CI95_hi": hi_mem,
-                    "root_constrs_median": med_ncr,
-                    "root_constrs_IQR": iqr_ncr,
-                    "root_constrs_CI95_lo": lo_ncr,
-                    "root_constrs_CI95_hi": hi_ncr,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
 def _wilcoxon_pairs(
     df: pd.DataFrame, case: str, a_mode: str, b_mode: str, col: str
 ) -> Tuple[float, float, float]:
@@ -318,19 +384,46 @@ def _wilcoxon_pairs(
         return (np.nan, np.nan, np.nan)
     x = merged[f"{col}_a"].to_numpy(dtype=float)
     y = merged[f"{col}_b"].to_numpy(dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not np.any(finite):
+        return (np.nan, np.nan, np.nan)
+    x = x[finite]
+    y = y[finite]
     diffs = x - y
+    if diffs.size == 0:
+        return (np.nan, np.nan, np.nan)
+    hl_med = _nanmedian_safe(diffs)
+
+    # Degenerate paired samples are common for `nodes` on easy cases:
+    # all differences can be exactly zero, which makes SciPy's Wilcoxon
+    # raise and/or emit runtime warnings. Treat identical paired samples as
+    # "no detectable difference" instead of polluting stdout with warnings.
+    nonzero_mask = np.abs(diffs) > 1e-12
+    diffs_nz = diffs[nonzero_mask]
+    if diffs_nz.size == 0:
+        return (1.0, 0.0, 0.0)
+
+    # Rank-biserial correlation from signed ranks of nonzero differences.
     try:
-        stat = wilcoxon(x, y, zero_method="wilcox", alternative="two-sided")
+        ranks = rankdata(np.abs(diffs_nz), method="average")
+        w_pos = float(np.sum(ranks[diffs_nz > 0]))
+        w_neg = float(np.sum(ranks[diffs_nz < 0]))
+        denom = w_pos + w_neg
+        rbc = ((w_pos - w_neg) / denom) if denom > 0 else 0.0
+    except Exception:
+        rbc = np.nan
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            stat = wilcoxon(
+                diffs_nz,
+                zero_method="wilcox",
+                alternative="two-sided",
+            )
         pval = float(stat.pvalue)
-        # Rank-biserial correlation
-        n = len(diffs)
-        T = n * (n + 1) / 2.0
-        W = float(stat.statistic)
-        rbc = 2.0 * W / T - 1.0
     except Exception:
         pval = np.nan
-        rbc = np.nan
-    hl_med = float(np.nanmedian(diffs)) if diffs.size > 0 else np.nan
     return (pval, hl_med, rbc)
 
 
@@ -343,16 +436,17 @@ def _build_extended_summary(
       - mip gap stats
       - warm-start and branching-hints utilization
       - Wilcoxon vs RAW (p, HL, RBC) for runtime and nodes (for modes ≠ RAW)
-    Also returns effects_wlz (WARM+LAZY vs RAW) per case for plotting.
+    Also returns effects_wlz (WARM_LAZY vs RAW) per case for plotting.
     """
     rows = []
     effects_wlz = []
+    runtime_col = _runtime_col(df)
 
     for case, g_case in df.groupby("case_folder"):
-        # Baseline medians for speedup (same as legacy)
-        base = g_case[g_case["mode_clean"].str.startswith("RAW")]
+        # Baseline medians for speedup
+        base = g_case[g_case["mode_clean"] == RAW_BASELINE_MODE]
         base_rt_med = (
-            float(np.nanmedian(pd.to_numeric(base["runtime_sec"], errors="coerce")))
+            _nanmedian_safe(pd.to_numeric(base[runtime_col], errors="coerce").to_numpy())
             if not base.empty
             else np.nan
         )
@@ -372,25 +466,21 @@ def _build_extended_summary(
             )
             # MIP gap
             mip = pd.to_numeric(g_mode.get("mip_gap", np.nan), errors="coerce")
-            mip_med = (
-                float(np.nanmedian(mip)) if mip is not None and mip.size > 0 else np.nan
+            mip_med = _nanmedian_safe(
+                mip.to_numpy() if hasattr(mip, "to_numpy") else mip
             )
             # Warm start / hints usage
             ws = pd.to_numeric(
                 g_mode.get("warm_start_applied_vars", np.nan), errors="coerce"
             )
-            ws_med = (
-                float(np.nanmedian(ws)) if ws is not None and ws.size > 0 else np.nan
-            )
+            ws_med = _nanmedian_safe(ws.to_numpy() if hasattr(ws, "to_numpy") else ws)
             bh = pd.to_numeric(
                 g_mode.get("branch_hints_applied", np.nan), errors="coerce"
             )
-            bh_med = (
-                float(np.nanmedian(bh)) if bh is not None and bh.size > 0 else np.nan
-            )
+            bh_med = _nanmedian_safe(bh.to_numpy() if hasattr(bh, "to_numpy") else bh)
 
-            # Legacy metrics reused (medians, CIs)
-            rt = pd.to_numeric(g_mode["runtime_sec"], errors="coerce").to_numpy()
+            # Median/IQR/CI metrics
+            rt = pd.to_numeric(g_mode[runtime_col], errors="coerce").to_numpy()
             nd = pd.to_numeric(g_mode["nodes"], errors="coerce").to_numpy()
             mem = pd.to_numeric(g_mode["peak_memory_gb"], errors="coerce").to_numpy()
             ppm = pd.to_numeric(g_mode["obj_ppm_vs_raw"], errors="coerce").to_numpy()
@@ -401,7 +491,7 @@ def _build_extended_summary(
 
             def med_iqr_ci(x):
                 return (
-                    float(np.nanmedian(x)),
+                    _nanmedian_safe(x),
                     _iqr(x),
                     *_bootstrap_ci95_median(x),
                 )
@@ -432,13 +522,15 @@ def _build_extended_summary(
             # Paired Wilcoxon vs RAW on runtime and nodes
             p_rt, hl_rt, rbc_rt = (np.nan, np.nan, np.nan)
             p_nd, hl_nd, rbc_nd = (np.nan, np.nan, np.nan)
-            if not str(mode).upper().startswith("RAW"):
+            if not str(mode).upper() == RAW_BASELINE_MODE:
                 p_rt, hl_rt, rbc_rt = _wilcoxon_pairs(
-                    df, case, mode, "RAW", "runtime_sec"
+                    df, case, mode, RAW_BASELINE_MODE, runtime_col
                 )
-                p_nd, hl_nd, rbc_nd = _wilcoxon_pairs(df, case, mode, "RAW", "nodes")
+                p_nd, hl_nd, rbc_nd = _wilcoxon_pairs(
+                    df, case, mode, RAW_BASELINE_MODE, "nodes"
+                )
                 # store WLZ-only effects for plotting
-                if mode == "WARM+LAZY":
+                if mode == "WARM_LAZY":
                     effects_wlz.append(
                         {
                             "case_folder": case,
@@ -455,6 +547,7 @@ def _build_extended_summary(
                 {
                     "case_folder": case,
                     "mode": mode,
+                    "method_exactness": _mode_exactness(mode),
                     "N": int(len(g_mode)),
                     "runtime_median": med_rt,
                     "runtime_IQR": iqr_rt,
@@ -497,14 +590,15 @@ def _overall_summary(df: pd.DataFrame) -> pd.DataFrame:
     Collapsed across cases: per-mode medians and IQR for main metrics.
     """
     rows = []
+    runtime_col = _runtime_col(df)
     for mode, g in df.groupby("mode"):
-        rt = pd.to_numeric(g["runtime_sec"], errors="coerce").to_numpy()
+        rt = pd.to_numeric(g[runtime_col], errors="coerce").to_numpy()
         nd = pd.to_numeric(g["nodes"], errors="coerce").to_numpy()
         ppm = pd.to_numeric(g["obj_ppm_vs_raw"], errors="coerce").to_numpy()
         mem = pd.to_numeric(g["peak_memory_gb"], errors="coerce").to_numpy()
 
         def med_iqr(x):
-            return float(np.nanmedian(x)), _iqr(x)
+            return _nanmedian_safe(x), _iqr(x)
 
         med_rt, iqr_rt = med_iqr(rt)
         med_nd, iqr_nd = med_iqr(nd)
@@ -513,6 +607,7 @@ def _overall_summary(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "mode": mode,
+                "method_exactness": _mode_exactness(mode),
                 "N": int(len(g)),
                 "runtime_median": med_rt,
                 "runtime_IQR": iqr_rt,
@@ -536,13 +631,14 @@ def _pairs_all_modes(df: pd.DataFrame) -> pd.DataFrame:
       - delta_nodes = nodes_a - nodes_b
     """
     out = []
+    runtime_col = _runtime_col(df)
     for (case, inst), g in df.groupby(["case_folder", "instance_name"]):
         # Keep only rows with runtime present
-        gg = g.dropna(subset=["runtime_sec"]).copy()
+        gg = g.dropna(subset=[runtime_col]).copy()
         if len(gg) < 2:
             continue
         # build dicts
-        runs = dict(zip(gg["mode"], gg["runtime_sec"]))
+        runs = dict(zip(gg["mode"], gg[runtime_col]))
         nodes = dict(zip(gg["mode"], gg["nodes"]))
         modes = list(runs.keys())
         for i in range(len(modes)):
@@ -584,11 +680,12 @@ def _fastest_share(df: pd.DataFrame) -> pd.DataFrame:
     Aggregate per case to compute share of being fastest.
     """
     rows = []
+    runtime_col = _runtime_col(df)
     for (case, inst), g in df.groupby(["case_folder", "instance_name"]):
-        g2 = g.dropna(subset=["runtime_sec"])
+        g2 = g.dropna(subset=[runtime_col])
         if g2.empty:
             continue
-        best_row = g2.loc[g2["runtime_sec"].idxmin()]
+        best_row = g2.loc[g2[runtime_col].idxmin()]
         rows.append(
             {"case_folder": case, "instance_name": inst, "best_mode": best_row["mode"]}
         )
@@ -610,6 +707,7 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
      - N (paired count)
      - success_rate_strict (violations == 'OK')
      - success_rate_status (status in OPTIMAL/SUBOPTIMAL/TIME_LIMIT)
+     - method_exactness (exact / heuristic)
     """
     if pairs.empty:
         return pd.DataFrame(
@@ -620,6 +718,7 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
                 "N",
                 "success_rate_strict",
                 "success_rate_status",
+                "method_exactness",
             ]
         )
 
@@ -650,7 +749,15 @@ def _mode_speed_stats(pairs: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame
         .reset_index()
     )
 
-    out = stats.merge(succ, on="mode", how="left")
+    mode_exact = (
+        d[["mode", "method_exactness"]]
+        .dropna()
+        .drop_duplicates(subset=["mode"], keep="last")
+    )
+    out = stats.merge(succ, on="mode", how="left").merge(mode_exact, on="mode", how="left")
+    out["method_exactness"] = out["method_exactness"].fillna(
+        out["mode"].map(_mode_exactness)
+    )
     return out
 
 
@@ -665,77 +772,13 @@ def main():
     # Write enriched merged (keeps with_* flags)
     df.to_csv(OUT_MERGED, index=False)
 
-    # Legacy aggregate
-    agg_basic = _aggregate_basic(df)
-
-    # Add speedups vs RAW to legacy
-    rows = []
-    for case in sorted(df["case_folder"].unique()):
-        base = agg_basic[
-            (agg_basic["case_folder"] == case)
-            & (agg_basic["mode"].str.upper().str.startswith("RAW"))
-        ]
-        if base.empty:
-            continue
-        base_rt = float(base["runtime_median"].values[0])
-        for _, row in agg_basic[agg_basic["case_folder"] == case].iterrows():
-            su = (
-                base_rt / row["runtime_median"]
-                if (row["runtime_median"] and row["runtime_median"] > 0)
-                else np.nan
-            )
-            d = row.to_dict()
-            d["speedup_vs_raw"] = su
-            rows.append(d)
-    agg2 = pd.DataFrame(rows)
-
-    # Wilcoxon for WARM+LAZY vs RAW (legacy)
-    def _wilc(df_full, case_name):
-        # fallback wrapper: reuse extended later; for summary.csv we keep p-values stub
-        return np.nan, np.nan
-
-    wilcoxon_rows = []
-    for case in sorted(df["case_folder"].unique()):
-        # Compute via pairs down below; keep placeholder here
-        wilcoxon_rows.append(
-            {
-                "case_folder": case,
-                "p_wilcoxon_runtime": np.nan,
-                "p_wilcoxon_nodes": np.nan,
-            }
-        )
-    wilc = pd.DataFrame(wilcoxon_rows)
-
-    summary_legacy = agg2.merge(wilc, on="case_folder", how="left")
-    summary_legacy.to_csv(OUT_SUMMARY, index=False)
-
-    # New: pairs vs RAW
+    # Pairs vs RAW
     pairs = _pair_with_raw(df)
     pairs.to_csv(OUT_PAIRS, index=False)
 
-    # New extended summary and effects
+    # Extended summary and effects
     summary_ext, effects_wlz = _build_extended_summary(df, pairs)
-    # Patch p-values for summary.csv from extended (WLZ vs RAW only); keep for backward compat
-    try:
-        wlz = summary_ext[summary_ext["mode"] == "WARM+LAZY"][
-            ["case_folder", "wilcoxon_p_runtime", "wilcoxon_p_nodes"]
-        ]
-        summary_legacy = summary_legacy.drop(
-            columns=["p_wilcoxon_runtime", "p_wilcoxon_nodes"], errors="ignore"
-        ).merge(
-            wlz.rename(
-                columns={
-                    "wilcoxon_p_runtime": "p_wilcoxon_runtime",
-                    "wilcoxon_p_nodes": "p_wilcoxon_nodes",
-                }
-            ),
-            on="case_folder",
-            how="left",
-        )
-        summary_legacy.to_csv(OUT_SUMMARY, index=False)
-    except Exception:
-        pass
-
+    summary_ext.to_csv(OUT_SUMMARY, index=False)
     summary_ext.to_csv(OUT_SUMMARY_EXT, index=False)
     effects_wlz.to_csv(OUT_EFFECTS_WLZ, index=False)
 
@@ -759,7 +802,7 @@ def main():
     print(f"Wrote per-instance pairs vs RAW to:   {OUT_PAIRS}")
     print(f"Wrote all pairwise mode pairs to:     {OUT_PAIRS_ALL}")
     print(f"Wrote fastest-mode share to:          {OUT_FASTEST}")
-    print(f"Wrote legacy summary to:              {OUT_SUMMARY}")
+    print(f"Wrote summary to:                     {OUT_SUMMARY}")
     print(f"Wrote extended summary to:            {OUT_SUMMARY_EXT}")
     print(f"Wrote WLZ vs RAW effects to:          {OUT_EFFECTS_WLZ}")
     print(f"Wrote overall (across cases) to:      {OUT_OVERALL}")

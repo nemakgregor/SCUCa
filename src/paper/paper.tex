@@ -1,426 +1,103 @@
-%% pscc2026_template.tex, slightly modified by Florin Capitanescu on 2025/03/15
-%% based on the version V1.1, 2019/03/11 provided by Mario Paolone 
-%% This is a Latex template to prepare submissions for the PSCC 2026 conference. 
-%% The template demonstrates the use of the class IEEEtran4PSCC.cls and is mostly
-%% based on the file bare_conf.tex (V1.4a) by Michael Shell.
-
-%%*************************************************************************
-%% Legal Notice:
-%% This code is offered as-is without any warranty either expressed or
-%% implied; without even the implied warranty of MERCHANTABILITY or
-%% FITNESS FOR A PARTICULAR PURPOSE! 
-%% User assumes all risk.
-%% In no event shall PSCC or any contributor to this code be liable for
-%% any damages or losses, including, but not limited to, incidental,
-%% consequential, or any other damages, resulting from the use or misuse
-%% of any information contained here.
-%%
-%% All comments are the opinions of their respective authors and are not
-%% necessarily endorsed by the PSCC.
-%%
-%% This work is distributed under the LaTeX Project Public License (LPPL)
-%% ( http://www.Latex-project.org/ ) version 1.3, and may be freely used,
-%% distributed and modified. A copy of the LPPL, version 1.3, is included
-%% in the base LaTeX documentation of all distributions of LaTeX released
-%% 2003/12/01 or later.
-%% Retain all contribution notices and credits.
-%% ** Modified files should be clearly indicated as such, including  **
-%% ** renaming them and changing author support contact information. **
-%%
-%% File list of work: pscc2026_template.tex, IEEEtran4PSCC.cls
-%%*************************************************************************
-
-
-% *** Authors should verify (and, if needed, correct) their LaTeX system  ***
-% *** with the testflow diagnostic prior to trusting their LaTeX platform ***
-% *** with production work.                 ***
-
-
-\documentclass{IEEEtran4PSCC}
-% The automatically selected options are the format (US letter) and conference mode.
-
-
-% Some very useful LaTeX packages include:
-% (uncomment the ones you want to load)
-% *** MISC UTILITY PACKAGES ***
-%
-%\usepackage{ifpdf}
-% Heiko Oberdiek's ifpdf.sty is very useful if you need conditional
-% compilation based on whether the output is pdf or dvi.
-% usage:
-% \ifpdf
-%   % pdf code
-% \else
-%   % dvi code
-% \fi
-% The latest version of ifpdf.sty can be obtained from:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/oberdiek/
-% Also, note that IEEEtran.cls V1.7 and later provides a builtin
-% \ifCLASSINFOpdf conditional that works the same way.
-% When switching from Latex to pdfLatex and vice-versa, the compiler may
-% have to be run twice to clear warning/error messages.
-
-% *** CITATION PACKAGES ***
-%
-%\usepackage{cite}
-% cite.sty was written by Donald Arseneau
-% V1.6 and later of IEEEtran pre-defines the format of the cite.sty package
-% \cite{} output to follow that of IEEE. Loading the cite package will
-% result in citation numbers being automatically sorted and properly
-% 'compressed/ranged'. e.g., [1], [9], [2], [7], [5], [6] without using
-% cite.sty will become [1], [2], [5]--[7], [9] using cite.sty. cite.sty's
-% \cite will automatically add leading space, if needed. Use cite.sty's
-% noadjust option (cite.sty V3.8 and later) if you want to turn this off
-% such as if a citation ever needs to be enclosed in parenthesis.
-% cite.sty is already installed on most LaTeX systems. Be sure and use
-% version 5.0 (2009-03-20) and later if using hyperref.sty.
-% The latest version can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/cite/
-% The documentation is contained in the cite.sty file itself.
-
-
-% *** GRAPHICS RELATED PACKAGES ***
-%
-\ifCLASSINFOpdf
-   \usepackage[pdftex]{graphicx}
-  % declare the path(s) where your graphic files are
-  % \graphicspath{{../pdf/}{../jpeg/}}
-  % and their extensions so you won't have to specify these with
-  % every instance of \includegraphics
-  % \DeclareGraphicsExtensions{.pdf,.jpeg,.png}
-\else
-  % or other class option (dvipsone, dvipdf, if not using dvips). graphicx
-  % will default to the driver specified in the system graphics.cfg if no
-  % driver is specified.
-   \usepackage[dvips]{graphicx}
-  % declare the path(s) where your graphic files are
-  % \graphicspath{{../eps/}}
-  % and their extensions so you won't have to specify these with
-  % every instance of \includegraphics
-  % \DeclareGraphicsExtensions{.eps}
-\fi
-% graphicx was written by David Carlisle and Sebastian Rahtz. It is
-% required if you want graphics, photos, etc. graphicx.sty is already
-% installed on most LaTeX systems. The latest version and documentation
-% can be obtained at: 
-% http://www.ctan.org/tex-archive/macros/Latex/required/graphics/
-% Another good source of documentation is 'Using Imported Graphics in
-% LaTeX2e' by Keith Reckdahl which can be found at:
-% http://www.ctan.org/tex-archive/info/epsLatex/
-%
-% Latex, and pdfLatex in dvi mode, support graphics in encapsulated
-% postscript (.eps) format. pdfLatex in pdf mode supports graphics
-% in .pdf, .jpeg, .png and .mps (metapost) formats. Users should ensure
-% that all non-photo figures use a vector format (.eps, .pdf, .mps) and
-% not a bitmapped formats (.jpeg, .png). IEEE frowns on bitmapped formats
-% which can result in 'jaggedy'/blurry rendering of lines and letters as
-% well as large increases in file sizes.
-%
-% You can find documentation about the pdfTeX application at:
-% http://www.tug.org/applications/pdftex
-
-
-
-% *** MATH PACKAGES ***
-%
-\usepackage[cmex10]{amsmath}
-\usepackage{amssymb}
-% A popular package from the American Mathematical Society that provides
-% many useful and powerful commands for dealing with mathematics. If using
-% it, be sure to load this package with the cmex10 option to ensure that
-% only type 1 fonts will utilized at all point sizes. Without this option,
-% it is possible that some math symbols, particularly those within
-% footnotes, will be rendered in bitmap form which will result in a
-% document that can not be IEEE Xplore compliant!
-%
-% Also, note that the amsmath package sets \interdisplaylinepenalty to 10000
-% thus preventing page breaks from occurring within multiline equations. Use:
-%\interdisplaylinepenalty=2500
-% after loading amsmath to restore such page breaks as IEEEtran.cls normally
-% does. amsmath.sty is already installed on most LaTeX systems. The latest
-% version and documentation can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/required/amsLatex/math/
-
-
-
-
-
-% *** SPECIALIZED LIST PACKAGES ***
-%
-% \usepackage{algorithmic}
-% algorithmic.sty was written by Peter Williams and Rogerio Brito.
-% This package provides an algorithmic environment fo describing algorithms.
-% You can use the algorithmic environment in-text or within a figure
-% environment to provide for a floating algorithm. Do NOT use the algorithm
-% floating environment provided by algorithm.sty (by the same authors) or
-% algorithm2e.sty (by Christophe Fiorio) as IEEE does not use dedicated
-% algorithm float types and packages that provide these will not provide
-% correct IEEE style captions. The latest version and documentation of
-% algorithmic.sty can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/algorithms/
-% There is also a support site at:
-% http://algorithms.berlios.de/index.html
-% Also of interest may be the (relatively newer and more customizable)
-% algorithmicx.sty package by Szasz Janos:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/algorithmicx/
-
-
-
-
-% *** ALIGNMENT PACKAGES ***
-%
-%\usepackage{array}
-% Frank Mittelbach's and David Carlisle's array.sty patches and improves
-% the standard LaTeX2e array and tabular environments to provide better
-% appearance and additional user controls. As the default LaTeX2e table
-% generation code is lacking to the point of almost being broken with
-% respect to the quality of the end results, all users are strongly
-% advised to use an enhanced (at the very least that provided by array.sty)
-% set of table tools. array.sty is already installed on most systems. The
-% latest version and documentation can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/required/tools/
-
-
-% IEEEtran contains the IEEEeqnarray family of commands that can be used to
-% generate multiline equations as well as matrices, tables, etc., of high
-% quality.
-
-
-
-
-% *** SUBFIGURE PACKAGES ***
-%\ifCLASSOPTIONcompsoc
-%  \usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
-%\else
-%  \usepackage[caption=false,font=footnotesize]{subfig}
-%\fi
-% subfig.sty, written by Steven Douglas Cochran, is the modern replacement
-% for subfigure.sty, the latter of which is no longer maintained and is
-% incompatible with some LaTeX packages including fixltx2e. However,
-% subfig.sty requires and automatically loads Axel Sommerfeldt's caption.sty
-% which will override IEEEtran.cls' handling of captions and this will result
-% in non-IEEE style figure/table captions. To prevent this problem, be sure
-% and invoke subfig.sty's 'caption=false' package option (available since
-% subfig.sty version 1.3, 2005/06/28) as this is will preserve IEEEtran.cls
-% handling of captions.
-% Note that the Computer Society format requires a larger sans serif font
-% than the serif footnote size font used in traditional IEEE formatting
-% and thus the need to invoke different subfig.sty package options depending
-% on whether compsoc mode has been enabled.
-%
-% The latest version and documentation of subfig.sty can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/subfig/
-
-
-
-
-% *** FLOAT PACKAGES ***
-%
-%\usepackage{fixltx2e}
-% fixltx2e, the successor to the earlier fix2col.sty, was written by
-% Frank Mittelbach and David Carlisle. This package corrects a few problems
-% in the LaTeX2e kernel, the most notable of which is that in current
-% LaTeX2e releases, the ordering of single and double column floats is not
-% guaranteed to be preserved. Thus, an unpatched LaTeX2e can allow a
-% single column figure to be placed prior to an earlier double column
-% figure. The latest version and documentation can be found at:
-% http://www.ctan.org/tex-archive/macros/Latex/base/
-
-
-%\usepackage{stfloats}
-% stfloats.sty was written by Sigitas Tolusis. This package gives LaTeX2e
-% the ability to do double column floats at the bottom of the page as well
-% as the top. (e.g., '\begin{figure*}[!b]' is not normally possible in
-% LaTeX2e). It also provides a command:
-%\fnbelowfloat
-% to enable the placement of footnotes below bottom floats (the standard
-% LaTeX2e kernel puts them above bottom floats). This is an invasive package
-% which rewrites many portions of the LaTeX2e float routines. It may not work
-% with other packages that modify the LaTeX2e float routines. The latest
-% version and documentation can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/sttools/
-% Do not use the stfloats baselinefloat ability as IEEE does not allow
-% \baselineskip to stretch. Authors submitting work to the IEEE should note
-% that IEEE rarely uses double column equations and that authors should try
-% to avoid such use. Do not be tempted to use the cuted.sty or midfloat.sty
-% packages (also by Sigitas Tolusis) as IEEE does not format its papers in
-% such ways.
-% Do not attempt to use stfloats with fixltx2e as they are incompatible.
-% Instead, use Morten Hogholm'a dblfloatfix which combines the features
-% of both fixltx2e and stfloats:
-%
-% \usepackage{dblfloatfix}
-% The latest version can be found at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/dblfloatfix/
-
-\usepackage{tabularx}
-\usepackage{array}    
-\usepackage{booktabs}   
-
-
-
-% *** PDF, URL AND HYPERLINK PACKAGES ***
-%
+\documentclass{ieeeaccess}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{rotating}
 \usepackage{url}
-% url.sty was written by Donald Arseneau. It provides better support for
-% handling and breaking URLs. url.sty is already installed on most LaTeX
-% systems. The latest version and documentation can be obtained at:
-% http://www.ctan.org/tex-archive/macros/Latex/contrib/url/
-% Basically, \url{my_url_here}.
 
-
-
-
-% *** Do not adjust lengths that control margins, column widths, etc. ***
-% *** Do not use packages that alter fonts (such as psLatex).         ***
-% There should be no need to do such things with IEEEtran.cls V1.6 and later.
-
-
-% correct bad hyphenation here
-\hyphenation{op-tical net-works semi-conduc-tor}
-
-
-
-% Set footer
+\usepackage{bm}
 \makeatletter
-\let\old@ps@headings\ps@headings
-\let\old@ps@IEEEtitlepagestyle\ps@IEEEtitlepagestyle
-\def\psccfooter#1{%
-    \def\ps@headings{%
-        \old@ps@headings%
-        \def\@oddfoot{\strut\hfill#1\hfill\strut}%
-        \def\@evenfoot{\strut\hfill#1\hfill\strut}%
-    }%
-    \def\ps@IEEEtitlepagestyle{%
-        \old@ps@IEEEtitlepagestyle%
-        \def\@oddfoot{\strut\hfill#1\hfill\strut}%
-        \def\@evenfoot{\strut\hfill#1\hfill\strut}%
-    }%
-    \ps@headings%
-}
+\AtBeginDocument{\DeclareMathVersion{bold}
+\SetSymbolFont{operators}{bold}{T1}{times}{b}{n}
+\SetSymbolFont{NewLetters}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathrm}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathit}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathbf}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathtt}{bold}{OT1}{pcr}{b}{n}
+\SetSymbolFont{symbols}{bold}{OMS}{cmsy}{b}{n}
+\renewcommand\boldmath{\@nomath\boldmath\mathversion{bold}}}
 \makeatother
 
-\psccfooter{%
-        \parbox{\textwidth}{\hrulefill \\ \small{24th Power Systems Computation Conference} \hfill \begin{minipage}{0.2\textwidth}\centering \vspace*{4pt} \includegraphics[scale=0.06]{PSCC_logo.png}\\\small{PSCC 2026} \end{minipage} \hfill \small{Limassol, Cyprus --- June 8-12, 2026}}%
-}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 
+%Your document starts from here ___________________________________________________
 \begin{document}
-%
-% paper title
-% Titles are generally capitalized except for words such as a, an, and, as,
-% at, but, by, for, in, nor, of, on, or, the, to and up, which are usually
-% not capitalized unless they are the first or last word of the title.
-% Linebreaks \\ can be used within to get better formatting as desired.
-% Do not put math or special symbols in the title.
-\title{Learning-Enhanced Security-Constrained\\ Unit Commitment Problem}
+\history{Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000.}
+\doi{10.1109/ACCESS.2024.0429000}
 
-
-
-%% To specify the authors when (number of affiliations <= 2)
-\author{
-\IEEEauthorblockN{Egor Grishin}
-\IEEEauthorblockA{CEST \\
-Skoltech\\
-Moscow, Russia\\
-Egor.Grishin@skoltech.ru}
-}
-
-
-%% To specify the authors when (number of affiliations > 2)
-% \author{\IEEEauthorblockN{Author n.1\IEEEauthorrefmark{1},
-% Author n.2\IEEEauthorrefmark{2},
-% Author n.3\IEEEauthorrefmark{3}, 
-% Author n.4\IEEEauthorrefmark{3} and
-% Author n.5\IEEEauthorrefmark{4}}
-% \IEEEauthorblockA{\IEEEauthorrefmark{1} Department Name of Organization A\\
-% Name of the organization A,
-% Address A\\ Emails if wanted}
-% \IEEEauthorblockA{\IEEEauthorrefmark{2} Department Name of Organization B\\
-% Name of the organization B,
-% Address B\\ Emails if wanted}
-% \IEEEauthorblockA{\IEEEauthorrefmark{3} Department Name of Organization C\\
-% Name of the organization C,
-% Address C\\ Emails if wanted}
-% \IEEEauthorblockA{\IEEEauthorrefmark{4}Department Name of Organization D\\
-% Name of the organization D,
-% Address D\\ Emails if wanted}
-% }
-
-
-% make the title area
-\maketitle
-
-% As a general rule, do not put math, special symbols or citations
-% in the abstract
+\title{Learning-Enhanced Security-Constrained Unit Commitment Problem}
+\author{\uppercase{Egor Grishin}\authorrefmark{1}}
+\address[1]{Center for Energy Science and Technology, Moscow, Russia}
+\corresp{Corresponding author: Egor Grishin (e-mail: GrishinEM.AA@yandex.ru).}
 \begin{abstract}
-Security-Constrained Unit Commitment is a large-scale optimization problem for scheduling day-ahead power generation. The objective is to determine the least-cost commitment and dispatch of generators while satisfying network limits and the N-1 security criterion. These constraints ensure system stability following any single line failure. Security constraints make the underlying mixed-integer linear program computationally inefficient for large systems.
-
-This paper presents a hybrid framework to accelerate the optimization process by integrating machine learning techniques with a traditional solver. Have been tested k-nearest neighbor warm-starts to provide initial solutions, branching hints to guide the solver’s search process, and methods for redundant constraint identification to reduce problem size.
-
-Computational experiments demonstrate that the integrated approach achieves speedups of up to 10 times over a standard solver baseline. This acceleration is achieved without compromising the feasibility or optimality of the final solution.
+The Security-Constrained Unit Commitment (SCUC) problem determines day-ahead generator schedules for power systems while maintaining grid stability. It requires finding minimum-cost generator commitments that satisfy power flow limits and N-1 security criteria. The challenge is that these constraints create large-scale mixed-integer programs, which are computationally intensive due to their combinatorial nature and the need for precise integer solutions, making them difficult for standard solvers to handle efficiently. We combine machine learning with traditional MILP solving to speed up the solution process. In this study we use k-nearest neighbor warm starts, branching hints, and constraint screening to eliminate redundant security checks. The aim of this article is identifying such combination of solving techniques which provides the best solution characteristics (accuracy and spent time). Tests across multiple grid sizes show 10x speedups compared to baseline solvers.
 \end{abstract}
 
-\begin{IEEEkeywords}
+\begin{keywords}
+Enter key words or phrases in alphabetical
 Hybrid approach, Large-scale problem, Machine learning, Mixed-integer linear programming, Unit commitment.
-\end{IEEEkeywords}
+\end{keywords}
+\titlepgskip=-21pt
 
-
-% Use this to place sponsorships
-\thanksto{\noindent Submitted to the 24th Power Systems Computation Conference (PSCC 2026).}
-
-
+\maketitle
 \section{Introduction}
-This paper is devoted to the Security-Constrained Unit Commitment (SCUC) problem, a key optimization task in the operation of modern power systems. The objective is to determine a least-cost schedule of generator commitment and dispatch for a set time horizon, while respecting all physical and operational limits. The SCUC is a core component of day-ahead electricity markets, and its solution must be obtained reliably under time limits.
+We tackle the Security-Constrained Unit Commitment (SCUC) problem, determining which generators run at what capacity over a 24-hour horizon while keeping costs low and the grid stable. SCUC sits at the core of day-ahead electricity markets, where solutions must be found quickly and reliably.
 
-The primary computational difficulty of this problem, which is formulated as a mixed-integer linear program (MILP), arises from two main sources. The first involves the complex inter-temporal dynamics of thermal generators. These include binary on/off decisions that are coupled across time by constraints such as minimum up and down times, startup cost profiles, and physical ramping limitations. These characteristics prevent the problem from being easily decomposed and solved for each time period independently.
+The computational difficulties come from two sources. First, thermal generators have minimum runtime requirements and cannot change output arbitrarily fast between hours. These temporal constraints tie decisions across all time periods, preventing simple hour-by-hour optimization. Second, we enforce N-1 security: the grid must survive any single component failure (transmission line or generator). For each hour, hundreds or thousands of contingency scenarios must be checked explicitly. With transmission lines numbering in the hundreds, these constraints grow quadratically, creating computational bottlenecks for real-world grids.
 
-The second and often more significant challenge is the enforcement of N-1 security constraints. This requirement forces that the power system must remain in a stable operating state following the unexpected failure of any single component, such as a transmission line or a generator. For each time period, this introduces a large number of contingency scenarios that must be explicitly modeled and checked. In typical formulations, the number of these security constraints can scale quadratically with the number of transmission lines, quickly making the problem computationally ineffective for realistic grid models.
+Standard MILP solvers cannot handle this scale efficiently. Adding renewable energy's variability makes the problem worse. Even state-of-the-art algorithms hit time limits before finding even suboptimal solutions for large grids, a critical issue when markets clear on strict schedules. We need acceleration methods that maintain solution quality while significantly reducing solve time.
 
-Due to this large scale and complexity, applying a standard MILP solver directly is often not a viable approach for practical applications. The integration of variable renewable energy sources further exacerbates this issue by introducing greater uncertainty and operational stress. Even with state-of-the-art solvers, large-scale SCUC instances frequently remain intractable. It means a feasible and optimal solution cannot be found within the strict time limits required for day-ahead market clearing. This difficulty pushes to create advanced methods that make solving faster while still keeping the solution optimality and stable.
+The formulations for the SCUC problem have evolved significantly, transitioning from early heuristics~\cite{Merlin1983} to the more sophisticated and computationally efficient modern MILP models. A computationally efficient MILP formulation for thermal unit commitment with piecewise-linear costs was introduced in~\cite{Carrion2006}. More accurate formulations for complex unit dynamics have since been developed~\cite{Ostrowski2012}. Decomposition methods such as Benders' decomposition and Lagrangian relaxation are often used to separate the main commitment problem from the power grid and security subproblems~\cite{Morales2013, Pan2016}.
 
-\section{Literature review}
-The formulations for the SCUC problem have evolved from early heuristics and Lagrangian relaxation~\cite{Merlin1983} to modern MILP models. A computationally efficient MILP formulation for thermal unit commitment with piecewise-linear costs was introduced in~\cite{Carrion2006}, which has become a foundational model. More accurate formulations for complex unit dynamics, such as minimum up/down logic and ramping, have since been developed~\cite{Ostrowski2012}. For handling larger systems, decomposition methods such as Benders' decomposition and Lagrangian relaxation are often used to separate the main commitment problem, which involves integer variables, from the network and security subproblems that involve continuous variables~\cite{Morales2013, Pan2016}.
 
-On the network modeling side, the DC power flow approximation is the standard for SCUC due to its linearity and scalability. Power Transfer Distribution Factors (PTDFs) are widely used to model base-case flows, while Line Outage Distribution Factors (LODFs) provide an efficient way to approximate post-contingency flows without solving the power flow problem for each contingency~\cite{Christie2000, Tejada2018}. Although more accurate AC models have been proposed, their non-convexity makes them computationally intractable for most practical unit commitment problems~\cite{Knueven2018}. To manage the quadratic growth of contingency constraints, a dynamic constraint generation technique is often adopted. In this approach, only a subset of potentially binding constraints is included initially, and additional constraints are added as needed during the branch-and-cut process~\cite{Tejada2018}. A complementary approach involves screening techniques that aim to discard provably redundant contingencies a priori using network sensitivities or historical data~\cite{Holzer2024}.
+On the power grid modeling side, the DC power flow approximation is the standard for SCUC due to its linearity and scalability. Power Transfer Distribution Factors (PTDFs) are widely used to model base-case flows, while Line Outage Distribution Factors (LODFs) provide an efficient way to approximate post-contingency flows without solving the power flow problem for each contingency~\cite{Christie2000, Tejada2018}. 
 
-More recently, machine learning (ML) has emerged as a powerful tool for accelerating the solution of MILPs~\cite{Bengio2021}. In power systems operations, ML has been applied to various problems, including directly predicting unit commitment schedules~\cite{Xavier2019, Quarm2021}, screening active constraints in optimal power flow problems~\cite{Donti2021}, and learning high-quality warm starts for MILP models~\cite{JimenezCordero2022}. While these methods offer benefits such as finding high-quality solutions more quickly, safety is a primary concern, as an incorrect warm start or constraint screening can compromise system reliability. This concern is addressed in this paper by presenting a framework that integrates machine learning accelerators with an exact MILP model. In this work, various combinations of the proposed approaches are investigated to identify an optimal configuration.
+To manage the quadratic growth of contingency constraints, a dynamic constraint generation technique is often adopted~\cite{Tejada2018}.
+ In this approach, a subset of potential binding constraints is initially included, and additional constraints can be added as necessary during the branching process~\cite{Tejada2018}. A complementary approach involves screening techniques that aim to discard redundant contingencies in advance using power grid sensitivities or historical data~\cite{Holzer2024, Porras2023, Pineda2020, He2024screening}. More advanced iterative filtering methods can eliminate over 99\% of redundant contingency constraints by adding only the most violated constraints per monitored line~\cite{Xavier2020CF, Castelli2024b}. Modern industrial solvers also enforce N-1 security via lazy constraint callbacks within the branch-and-bound tree~\cite{Castelli2024b, Qiu2022}.
+
+Machine learning offers a transformative path forward \cite{Bengio2021, Wu2024, Tuo2023}, fundamentally altering the approach to solving the SCUC problem by enabling predictive analytics for commitment schedules~\cite{Xavier2019, Quarm2021}, proactive constraint management~\cite{Donti2021}, and the generation of high-quality initial solutions for MILP solvers~\cite{JimenezCordero2022, Hasan2023}. However, wrong ML predictions risk grid reliability. A bad warm start or missed constraint could mean blackouts.
+
+Our solution is in usage of ML acceleration inside an exact MILP framework. The ML components speed things up, while the MILP guarantees correctness. We test multiple ML techniques - warm starts, branching guidance, constraint screening - both individually and combined, identifying which configurations work best. The electrical grid is modeled using the DC approximation, chosen for its balance of accuracy and computational efficiency. In this model, base-case flows are calculated using Power Transfer Distribution Factors (PTDF), and the impacts of line outages are modeled with Line Outage Distribution Factors (LODF), allowing for a linear and scalable representation of grid dynamics crucial for solving the SCUC problem.
 
 \section{Model Definition}
 
-A deterministic SCUC problem is solved over a discrete set of time periods $\mathcal{T}=\{0,\dots,T-1\}$. The power system comprises a set of thermal generating units $\mathcal{G}$, buses $\mathcal{B}$, transmission lines $\mathcal{L}$, and reserve products $\mathcal{R}$. The electrical network is modeled using the DC approximation. In this model, base-case flows are calculated using Power Transfer Distribution Factors (PTDFs), and the impacts of line outages are modeled with Line Outage Distribution Factors (LODFs).
+A deterministic SCUC problem is solved over a discrete set of time periods $\mathcal{T}=\{0,\dots,T-1\}$. The power system contains a set of thermal generating units $\mathcal{G}$, buses $\mathcal{B}$, transmission lines $\mathcal{L}$, and reserve products $\mathcal{R}$.
 
 The primary decision variables are defined for each thermal generator $g\in\mathcal{G}$ and time period $t\in\mathcal{T}$ as follows:
 \begin{itemize}
-    \item Commitment status $u_{g,t}\in\{0,1\}$, which indicates if the generator is on or off.
+    \item Commitment status $u_{g,t}\in\{0,1\}$, which indicates if the generator is on ($1$) or off ($0$).
     \item Startup and shutdown indicators $v_{g,t}, w_{g,t}\in\{0,1\}$, which indicate a change in commitment status.
-    \item Segmented power output $p^{\mathrm{seg}}_{g,t,s}\ge 0$, representing the power produced in each segment $s$ of the generator's piecewise-linear cost curve.
+    \item Segmented power output $p^{\mathrm{seg}}_{g,t,s}\ge 0$, representing the power produced in each segment $s \in \mathcal{K}_g$ of the generator's piecewise-linear cost curve, where $\mathcal{K}_g$ is set of corresponding segments for generator $g$.
     \item Total generation $p_{g,t}$, defined as $p_{g,t}=u_{g,t}\underline{P}_{g,t}+\sum_{s}p^{\mathrm{seg}}_{g,t,s}$, where $\underline{P}_{g,t}$ is the minimum stable generation level.
     \item Reserve provision $r_{k,g,t}\ge 0$ for each reserve product $k\in\mathcal{R}$.
-    \item System-wide reserve shortfall $s_{k,t}\ge 0$ for each reserve product $k\in\mathcal{R}$.
+    \item System-wide reserve shortfall $h_{k,t}\ge 0$ for each reserve product $k\in\mathcal{R}$.
 \end{itemize}
 
-For the transmission network, the variables for each line $\ell\in\mathcal{L}$ and time $t\in\mathcal{T}$ are:
+For the transmission grid, the variables for each line $\ell\in\mathcal{L}$ and time $t\in\mathcal{T}$ are:
 \begin{itemize}
     \item Base-case power flow $f_{\ell,t}\in\mathbb{R}$.
     \item Base-case overflow slack variables $\overline{o}_{\ell,t},\underline{o}_{\ell,t}\ge 0$.
     \item Shared N-1 contingency overflow slack variables $\overline{c}_{\ell,t},\underline{c}_{\ell,t}\ge 0$.
 \end{itemize}
 
-The operational logic for thermal units is enforced through a set of inter-temporal constraints. The power produced in each segment is constrained by the unit's commitment status and physical capacity, $A_{g,s,t}$:
+The operational logic for thermal units is enforced through a set of inter-temporal constraints. The power produced in each segment is constrained by the unit's commitment status and segment capacity, $A_{g,s,t}$:
 \begin{equation}
 0\le p^{\mathrm{seg}}_{g,t,s} \le A_{g,s,t}\,u_{g,t}, \ \forall g,t,s. \label{eq:seg-link}
 \end{equation}
 The system-wide power balance must be maintained at each time period, with total generation equal to total demand, $D_{b,t}$:
 \begin{equation}
-\sum_{g}\Big(u_{g,t}\underline{P}_{g,t}+\sum_{s}p^{\mathrm{seg}}_{g,t,s}\Big)=\sum_{b}D_{b,t}, \ \forall t. \label{eq:balance}
+\sum_{g}\Big(u_{g,t}\underline{P}_{g,t}+\sum_{s\in \mathcal{K}_g}p^{\mathrm{seg}}_{g,t,s}\Big)=\sum_{b}D_{b,t}, \ \forall t. \label{eq:balance}
 \end{equation}
 The availability of reserves is limited by the capacity between the current operating point of a unit and its maximum output, $\overline{P}_{g,t}$:
 \begin{equation}
-\sum_{s}p^{\mathrm{seg}}_{g,t,s}+\sum_{k}r_{k,g,t}\le (\overline{P}_{g,t}-\underline{P}_{g,t})u_{g,t}, \ \forall g,t. \label{eq:res-head}
+\sum_{s\in \mathcal{K}_g}p^{\mathrm{seg}}_{g,t,s}+\sum_{k}r_{k,g,t}\le (\overline{P}_{g,t}-\underline{P}_{g,t})u_{g,t}, \ \forall g,t. \label{eq:res-head}
 \end{equation}
 The total reserve provided must be equal to the system requirement $R_{k,t}$ minus penalized shortfall:
 \begin{equation}
-\sum_{g}r_{k,g,t} + s_{k,t} \ge R_{k,t}, \ \forall k,t. \label{eq:res-req}
+\sum_{g}r_{k,g,t} + h_{k,t} \ge R_{k,t}, \ \forall k,t. \label{eq:res-req}
 \end{equation}
 Logical constraints define the startup and shutdown events based on changes in commitment status:
 \begin{align}
@@ -438,14 +115,20 @@ Minimum up-time ($U_g$) and down-time ($D_g$) requirements are enforced:
 \sum_{\tau=t-D_g+1}^{t} w_{g,\tau} \le 1-u_{g,t}. \label{eq:min-ud}
 \end{align}
 
-The DC power flow model provides a linear approximation of grid physics. The net power injection at each bus is defined:
+The DC power flow model provides a linear approximation of grid physics. Net power injection at each bus is defined:
+
 \begin{equation}
-\mathrm{inj}_{b,t}=\sum_{g\in\mathcal{G}_b} p_{g,t} - D_{b,t}.
+\mathrm{inj}_{b,t}=\sum_{g\in\mathcal{G}_b} p_{g,t} - D_{b,t},
 \end{equation}
+where $\mathcal{G}_b \subseteq \mathcal{G}$ is the set of generators connected to bus $b$.
+
 The base-case flow on each line $\ell$ is then calculated as a linear combination of these injections, weighted by the pre-computed PTDFs:
 \begin{equation}
-f_{\ell,t}=\sum_{b\neq b^{\mathrm{ref}}}\mathrm{PTDF}_{\ell,b}\,\mathrm{inj}_{b,t}. \label{eq:flow-def}
+f_{\ell,t}=\sum_{b\neq b^{\mathrm{ref}}}\mathrm{PTDF}_{\ell,b}\,\mathrm{inj}_{b,t},
+\label{eq:flow-def}
 \end{equation}
+where $b^{\mathrm{ref}}$ is the reference bus.
+
 These flows must respect the line's normal thermal rating, $F^{\mathrm{N}}_{\ell,t}$, with any violation captured by slack variables:
 \begin{align}
 f_{\ell,t} \le F^{\mathrm{N}}_{\ell,t}+\overline{o}_{\ell,t}, \quad
@@ -453,7 +136,7 @@ f_{\ell,t} \le F^{\mathrm{N}}_{\ell,t}+\overline{o}_{\ell,t}, \quad
 \end{align}
 To ensure N-1 security, the post-contingency flow on a monitored line $\ell$ following the outage of a line $m$ is approximated using the LODF:
 \begin{equation}
-f_{\ell,t}^{(m)} \approx f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t}. \label{eq:lodf}
+f_{\ell,t}^{m} \approx f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t}. \label{eq:lodf}
 \end{equation}
 These post-contingency flows must remain within a higher emergency rating, $F^{\mathrm{E}}_{\ell,t}$. A single pair of shared slack variables is used per monitored line to capture the worst-case violation across all contingencies:
 \begin{align}
@@ -462,45 +145,24 @@ f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t} &\le F^{\mathrm{E}}_{\ell,t}+\overline{
 \end{align}
 
 
-The objective function minimizes the total system operating cost, which includes production costs, startup costs, and penalties for constraint violations.
+The objective function minimizes total system operating cost, including production costs, startup costs, and penalties for constraint violations:
+
 \begin{align}
 \min \ \ & \sum_{t}\sum_{g}\Big( C^{\min}_{g,t}\,u_{g,t} + \sum_{s\in\mathcal{K}_g} C^{\mathrm{seg}}_{g,s,t}\, p^{\mathrm{seg}}_{g,t,s} \Big) \nonumber\\
 & + \sum_{t}\sum_{g} C^{\mathrm{su}}_g\, v_{g,t} \label{eq:obj}\\
-& + \sum_{t}\sum_{k\in\mathcal{R}} \pi^{\mathrm{res}}_k\, s_{k,t} \nonumber\\
+& + \sum_{t}\sum_{k\in\mathcal{R}} \pi^{\mathrm{res}}_k\, h_{k,t} \nonumber\\
 & + \sum_{t}\sum_{\ell\in\mathcal{L}} \pi^{\mathrm{flow}}_{\ell,t}(\overline{o}_{\ell,t}+\underline{o}_{\ell,t}) \nonumber\\
 & + \gamma \sum_{t}\sum_{\ell\in\mathcal{L}} \pi^{\mathrm{flow}}_{\ell,t}(\overline{c}_{\ell,t}+\underline{c}_{\ell,t}). \nonumber
 \end{align}
 The terms in \eqref{eq:obj} are defined as follows. The first line represents production costs, where $C^{\min}_{g,t}$ is the no-load cost and $C^{\mathrm{seg}}_{g,s,t}$ is the marginal cost for energy in each segment. The second term accounts for startup costs, $C^{\mathrm{su}}_g$. The remaining terms are high-cost penalties for violating soft constraints: $\pi^{\mathrm{res}}_k$ penalizes shortfalls in reserve requirements, while $\pi^{\mathrm{flow}}_{\ell,t}$ penalizes base-case and post-contingency transmission overflows. The multiplier $\gamma>1$ is used to prioritize resolving contingency violations.
 
 
-\section{Acceleration Framework}
-Several acceleration mechanisms are investigated, each identified by a short label for reference in the computational experiments.
-
-\paragraph{Constraint Screening (PRUNE-$\tau$, GNN).}
-Given that the number of post-contingency transmission constraints can be prohibitively large, screening methods are applied to reduce the set of constraints considered by the solver. A lightweight screening method is based on a 1-nearest-neighbor (1-NN) algorithm. Each problem instance is represented by a z-scored load vector. For a new instance, the solution from the nearest neighbor in a database of previously solved cases is used to estimate post-contingency flows using the target scenario's Line Outage Distribution Factor (LODF) and Power Transfer Distribution Factor (PTDF) matrices. For each monitored line $\ell$ and contingency $m$, the minimum relative emergency margin across time is computed:
-\begin{equation}
-s^{m}_{\ell}=\min_t \frac{F^{\mathrm{E}}_{\ell,t}-|f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t}|}{F^{\mathrm{E}}_{\ell,t}}.
-\end{equation}
-Contingency pairs with $s_{\ell}^m \ge\tau$ are pruned for all time periods. This technique is labeled as PRUNE-$\tau$, where a larger $\tau$ indicates more aggressive pruning.
-
-An alternative screening approach utilizes a Graph Neural Network (GNN) to score the criticality of each transmission line. The network operates on a line graph where nodes represent transmission lines and edges connect lines that share a bus. A two-layer GraphSAGE model is trained using Binary Cross-Entropy (BCE) loss to produce a per-line criticality score. At inference, a contingency is kept only if one of its associated lines is predicted to be critical. This optional screening layer is labeled as GNN.
-
-\paragraph{Lazy Enforcement (LAZY, BANDIT).}
-Instead of adding all post-contingency limits a priori, N-1 security is enforced using a lazy constraint callback. At each incumbent solution found during the branch-and-cut process, post-contingency flows are calculated. If any flow violates its emergency limit, a linear inequality is generated and added to the model. This approach keeps the root Linear Program (LP) compact while guaranteeing the final solution is N-1 secure. This base technique is labeled as LAZY.
-
-An optional modification adds only the top-$K$ most violated contingencies at each incumbent.  A more adaptive approach uses a multi-armed bandit to dynamically select the parameter $K$. Each ``arm'' of the bandit corresponds to a candidate value. After a new incumbent solution is found, a reward is computed based on metrics such as gap improvement per unit of time. The value of $K$ for the next incumbent is then selected based on an $\varepsilon$-greedy rule that balances exploration and exploitation. This adaptive variant is labeled as BANDIT.
-
-\paragraph{Warm Starts (WARM, GRU).}
-To accelerate the discovery of the first feasible solution, the MILP solver is warm-started using initial values derived from ML models. One approach is a memory-light 1-NN method that matches an instance to its nearest neighbor in a historical database based on system load features. The commitment schedules, segment powers, and reserve provisions from the historical solution are then used to populate the start attributes for the variables in the new problem. This technique is labeled as WARM.
-
-\begin{table*}[t]
-\centering
+\begin{table*}\centering
 \caption{Optimal case results for all modes}
 \label{tab:optimal_cases}
 \renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|X|X|}
-\hline
-\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
+\footnotesize
+\begin{tabular}{|l||c|c|c|c|c|c|c|}\hline\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
 RAW+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 98/0/2 & 71/0/29 \\ \hline
 RAW+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 71/0/29 \\ \hline
 WARM & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
@@ -522,26 +184,101 @@ WARM+PRUNE-0.50 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \
 WARM+PRUNE-0.50+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
 WARM+PRUNE-0.80 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 93/0/7 \\ \hline
 WARM+PRUNE-0.80+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 92/0/8 \\ \hline
-\end{tabularx}
+\end{tabular}
 \end{table*}
+\section{Acceleration Framework}
+Several acceleration methods are evaluated to enhance the computational performance of the MILP solver. Each technique is assigned a concise label for clear identification during the presentation of computational results. These methods encompass constraint screening, lazy constraint enforcement, warm-starting, and branching guidance.\
 
-A more granular warm start for generator dispatch profiles is generated using a Gated Recurrent Unit (GRU) network. A two-layer GRU is trained with Mean Squared Error (MSE) loss to predict the fraction of available headroom used by each generator at each hour. This provides a coherent dispatch trajectory that can be used to initialize the power segment variables. This optional dispatch warm start is labeled as GRU.
+\paragraph{Constraint Screening (PRUNE-$\tau$)}
+To manage the prohibitively large number of post-contingency transmission constraints, screening methods are applied to reduce the set of active constraints. The lightweight screening approach, PRUNE-$\tau$, is based on a 1-nearest-neighbor (1-NN) algorithm. Each problem instance is characterized by a feature vector derived from its z-scored load series. The z-score for a load series $\{L_t\}_{t=0}^{T-1}$ is calculated as:
+\begin{equation}
+z_t=\frac{L_t-\mu_L}{\sigma_L}, \ \mu_L=\frac{1}{T}\sum_t L_t, \ \sigma_L^2=\frac{1}{T-1}\sum_t(L_t-\mu_L)^2.
+\end{equation}
+For a new instance with feature vector $z$, its Euclidean distance to each instance $z^{(i)}$ in a database of solved cases is computed, $d(i)=\big\|z-z^{(i)}\big\|_2$. The solution from the nearest neighbor, $\hat{\imath}=\arg\min_i d(i)$, is then used to estimate post-contingency flows for the target scenario. The neighbor index $\hat{\imath}$ provides a full solved dispatch profile. We reuse its generator outputs
+$p^{(\hat{\imath})}_{g,t}$ as a prediction for the target instance,
+\begin{equation}
+p^{\mathrm{pred}}_{g,t} := p^{(\hat{\imath})}_{g,t},
+\end{equation}
+and combine it with the target demand $D_{b,t}$ to form predicted net injections at each bus:
+\begin{equation}
+\mathrm{inj}^{\mathrm{pred}}_{b,t}=\sum_{g\in\mathcal{G}_b} p^{\mathrm{pred}}_{g,t} - D_{b,t}.
+\end{equation}
 
-\paragraph{Branching Guidance (HINTS, COMMIT).}
-In addition to providing a warm start, ML models are used to guide the solver's branching decisions. The commitment values from a warm-start solution can be directly translated into branching hints for the solver by setting the variable hint value attribute and assigning a time-biased branching priority to encourage exploration of early time periods first. This technique is labeled as HINTS.
+This allows for the calculation of the minimum relative emergency margin $s^{m}_{\ell}$ (by calculating flows $f_{\ell,t}$, $f_{m,t}$ using \eqref{eq:flow-def}, \eqref{eq:lodf}), for each monitored line $\ell$ and contingency $m$ across all time periods $t$:
+\begin{equation}
+s^{m}_{\ell}=\min_t \frac{F^{\mathrm{E}}_{\ell,t}-|f_{\ell,t}+\mathrm{LODF}_{\ell,m}f_{m,t}|}{F^{\mathrm{E}}_{\ell,t}}.
+\end{equation}
+Contingency-line pairs where $s_{\ell}^m \ge \tau$ are pruned from the model for all time periods. The parameter $\tau$ controls the aggressiveness of the pruning. This 1-NN screener is implemented using SciPy.
 
-A more advanced method uses a dedicated classifier, such as a Gradient Boosted Decision Tree (GBDT), which is trained on historical data to predict the commitment probability for each generator at each time period. These probabilities are then translated into hints and priorities to influence the solver's search order. This technique is labeled as COMMIT.
+\paragraph{Constraint Screening (GNN).}
 
-\section{Computational Experiments}
+An alternative screening approach, labeled GNN, employs a Graph Neural Network to score the criticality of each transmission line~\cite{Nakiganda2023}. The GNN operates on a line graph representation of the power system, where nodes correspond to transmission lines and edges connect lines that share a common bus. Each line-node $\ell=(i,j)$ is described by a feature vector including susceptance, average normal and emergency limits and average endpoint loads.
+Supervision is obtained from historical solutions by labeling a line as critical if it is frequently near its
+emergency limit:
+\begin{equation}
+y_\ell= 1\ \iff\ \max_t \frac{|f_{\ell,t}|}{F^E_{\ell,t}} \ge y_{\mathrm{thr}},\ y_{\mathrm{thr}}=0.70.
+\end{equation}
 
-\begin{table*}[t]
-\centering
+A two-layer GraphSAGE classifier with a Binary Cross-Entropy (BCE) loss wass trained to predict line criticality probabilities
+$\hat p_\ell\in[0,1]$.
+At inference, we screen contingency constraints using a fixed threshold $\theta=0.60$:
+\begin{align}
+\text{line outage } m:\quad &\text{keep }(\ell,m)\iff (\hat p_\ell\ge\theta)\ or\ (\hat p_m\ge\theta),\\
+\text{gen outage } g:\quad  &\text{keep }(\ell,g)\iff \hat p_\ell\ge\theta.
+\end{align}
+So the line is kept if the post-contingency flow constraint on the monitored line $\ell$ under the outage of line $m$ if at least one of the two lines either the monitored line $\ell$ or the outaged line $m$ is predicted to be critical by the model.
+
+The GNN model is implemented using PyTorch with NetworkX utilized for generating topology features. The GraphSAGE model employs a hidden size of 64 and is trained with the Adam optimizer at a learning rate of $10^{-3}$.
+
+
+
+\paragraph{Lazy Enforcement (LAZY, BANDIT)}
+Instead of adding all post-contingency security constraints to the initial model, N-1 security is enforced dynamically using a lazy constraint callback within the branching process~\cite{Castelli2024b, Qiu2022}. This base technique is labeled LAZY. At each incumbent integer-feasible solution $(u,p,f)$ found by the solver, post-contingency flows are calculated for each outage $m$ and each monitored line 
+$l$ using the line's LODF, denoted $\alpha_{\ell m}$:
+\begin{equation}
+f^{m}_{\ell,t}=f_{\ell,t}+\alpha_{\ell m} f_{m,t}.
+\end{equation}
+If any calculated flow $f^{m}_{\ell,t}$ violates its corresponding emergency limit $F^{\mathrm{E}}_{\ell,t}$, one or more linear inequalities are generated and added to the MILP model as lazy constraints. The added constraints take the form:
+\begin{align}
+f_{\ell,t}+\alpha_{\ell m} f_{m,t} &\le F^{\mathrm{E}}_{\ell,t}+\overline{c}_{\ell,t}, \\
+-f_{\ell,t}-\alpha_{\ell m} f_{m,t} &\le F^{\mathrm{E}}_{\ell,t}+\underline{c}_{\ell,t}.
+\end{align}
+This approach maintains a more compact root Linear Program (LP) while ensuring the final solution is N-1 secure.
+
+A modification to this approach involves adding only the top-$K$ most violated contingencies at each callback, sorting violations by their severity. A more adaptive variant, labeled BANDIT, employs a multi-armed bandit algorithm to dynamically select the parameter $K$ from a finite set of candidate values $\mathcal{K}$. Each value in $\mathcal{K}$ represents an "arm" of the bandit. After a new incumbent is found, a reward is computed based on metrics such as gap improvement per unit of time. To prioritize keeping the LPs small, the reward is practically defined as a negative function of the number of added cuts. The value of $K$ for the subsequent callback, $K_{t+1}$, is selected via an $\varepsilon$-greedy policy that balances exploration (random selection) and exploitation (selecting the arm with the best empirical mean reward, $\bar{R}_K$):
+\begin{equation}
+K_{t+1}=\begin{cases}
+\text{uniformly from }\mathcal{K}, & \text{with probability }\varepsilon, \\
+\arg\max_{K\in\mathcal{K}}\bar{R}_K, & \text{with probability }1-\varepsilon.
+\end{cases}
+\end{equation}
+These lazy enforcement mechanisms are implemented using the solver's native callback API.
+
+
+\paragraph{Warm Starts (WARM, GRU)}
+To accelerate the discovery of a first feasible solution, the MILP solver is warm-started with initial values derived from machine learning models. A memory-light approach, labeled WARM, uses the 1-NN method described previously to match a new instance with the nearest solved instance in a historical database. The commitment schedules, segment powers, and reserve provisions from the historical solution, denoted as $\big\{u_{g,t},\ p^{\mathrm{seg}}_{g,t,s},\ r_{k,g,t}\big\}_{g,t,s,k}$, are then supplied as the initial values for the corresponding variables in the new problem. To ensure these initial values are solver-friendly, a solver-free repair algorithm is applied. This algorithm enforces minimum up/down times, ramping limits, and generation-load balance through heuristics. For a given commitment schedule $(u_{g,t},v_{g,t},w_{g,t})$ and previous power output $p_{g,t-1}$, the repair routine calculates feasible power bounds at time $t$:
+\begin{align}
+p^{\mathrm{lb}}_{g,t}&=\max\!\Big\{u_{g,t}\underline{P}_{g,t},\ p_{g,t-1}-\big(RD_g\,u_{g,t}+SD_g\,w_{g,t}\big)\Big\}, \\
+p^{\mathrm{ub}}_{g,t}&=\min\!\Big\{u_{g,t}\overline{P}_{g,t},\ p_{g,t-1}+RU_g\,u_{g,t-1}+SU_g\,v_{g,t}\Big\}.
+\end{align}
+A water-filling algorithm then distributes any residual energy to satisfy the system power balance equation whenever feasible.
+
+A more granular warm-start method, labeled GRU, generates dispatch profiles for each generator using a Gated Recurrent Unit network. A two-layer GRU is trained with Mean Squared Error (MSE) loss to predict the fraction of available reserve capacity used by each generator at each hour. This "above-minimum" fraction is defined as:
+\begin{equation}
+r_{g,t}=\frac{\max\{0,\ p_{g,t}-u_{g,t}\underline{P}_{g,t}\}}{\max\{10^{-6},\,u_{g,t}\big(\overline{P}_{g,t}-\underline{P}_{g,t}\big)\}}\in[0,1].
+\end{equation}
+At inference, the predicted fraction $\hat r_{g,t}$ determines the above-minimum energy $\hat e_{g,t}=\hat r_{g,t}\big(\overline{P}_{g,t}-\underline{P}_{g,t}\big)$. This energy is then allocated across the generator's power segments proportionally to the segment capacities $A_{g,s,t}$, providing a coherent dispatch trajectory to initialize the power segment variables:
+\begin{equation}
+\hat p^{\mathrm{seg}}_{g,t,s}=\hat e_{g,t}\,\frac{A_{g,s,t}}{\sum_{s'}A_{g,s',t}}.
+\end{equation}
+This GRU-based warm start is implemented in PyTorch, with a model architecture featuring a hidden size of 32.
+
+\begin{table*}\centering
 \caption{Speed-up factors across cases and modes.}
 \label{tab:speedup}
 \renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|X|X|}
-\hline
-\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
+\footnotesize
+\begin{tabular}{|l||c|c|c|c|c|c|c|}\hline\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
 RAW+COMMIT & 1.07x & 1.03x & 1.05x & 1.09x & 1.02x & 1.03x \\ \hline
 RAW+GNN & 1.05x & 1.02x & 1.03x & 1.09x & 1.01x & 1.02x \\ \hline
 WARM & 1.06x & 0.98x & 1.19x & 1.43x & 1.02x & 1.18x \\ \hline
@@ -563,55 +300,41 @@ WARM+PRUNE-0.50 & 1.27x & 1.44x & 5.64x & 3.92x & 3.06x & 3.37x \\ \hline
 WARM+PRUNE-0.50+GNN & 1.31x & 1.43x & 5.68x & 3.92x & 3.05x & 3.41x \\ \hline
 WARM+PRUNE-0.80 & 1.30x & 1.44x & 4.82x & 2.43x & 1.04x & 1.64x \\ \hline
 WARM+PRUNE-0.80+GNN & 1.29x & 1.45x & 4.76x & 2.42x & 1.05x & 1.63x \\ \hline
-\end{tabularx}
+\end{tabular}
 \end{table*}
-
-All computational experiments were conducted using the Gurobi 12.1 solver on a machine equipped with an AMD Ryzen 7840HS processor and 32 GB of RAM. The benchmark suite consisted of six MATPOWER cases from the UnitCommitment.jl repository, which were used to formulate a multi-period DC-SCUC with full N-1 security constraints (cases 14, 57, 89pegase, 118 and 300).
-
-For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing, respectively. Only the test split was used for all reported results. The speedups were measured relative to a baseline RAW mode, which represented a complete MILP optimization solved without any acceleration techniques. The performance of different methods was analyzed using the empirical cumulative distribution function (ECDF) of the per-instance speedups.
-
-A total of 7,702 solver runs were performed across 25 different acceleration modes on a final test set of 327 unique problem instances. The total runtime for all experiments was 73.5 hours. Of these runs, 93.9\% finished with an optimal solution, 4.2\% were infeasible, and 1.9\% terminated due to the time limit.
-
-At the instance level, 95.7\% of the unique instances were solved optimally at least once by one of the tested modes. The time limit for smaller cases (case 14 - case 89 pegase) was set at 60 seconds, while for larger cases, it was set at 600 seconds. In addition, the training and validation sets of instances were solved over a period of approximately one week.
-
-The robustness of each method is detailed in Tab.~\ref{tab:optimal_cases}. This table reports the percentage of instances that were solved optimally, found to be infeasible, or timed out. All variants using lazy enforcement or constraint pruning achieve perfect or near-perfect optimality rates across all test cases.
-In contrast, the baseline methods are less robust on larger systems. For example, the RAW+COMMIT variant only solves 71\% of case300 instances optimally within the given time limit, compared to the perfect or near-perfect rates achieved by other methods. It is also worth noting that the RAW baseline occasionally finds infeasible solutions for case 57, as confirmed by other methods. In addition, the least aggressive pruning strategy (identifying redundant constraints) sometimes fails to find an optimal solution for case 300, as shown in the table. This suggests that overly aggressive pruning may remove correct constraints. Also warm start methods and branching hints may provide start solutions which leads to time limit solver aborting. 
-
-\begin{figure}
-    \centering
-    \includegraphics[width=0.5\textwidth]{plots/Speedup_general.png}
-    \caption{Aggregate speedup distribution across all test cases.}
-    \label{fig:Speedup_general}
-\end{figure}
-
-The speedup factors relative to the RAW baseline are summarized in Tab.~\ref{tab:speedup} and Fig.~\ref{fig:Speedup_general}. The best result for each case is highlighted in bold. The strongest average accelerations are delivered by the constraint pruning methods with a high (more aggressive) threshold. The WARM+PRUNE-0.10 configuration achieves the highest average speedup of 8.56x. Among the lazy enforcement strategies, WARM+LAZY+BANDIT is the most effective, attaining an average speedup of 7.47x. The results show that the best method can be case-dependent; pruning excels on case89pegase (up to 25.83x), while lazy enforcement dominates the largest instance, case300 (up to 13.14x). Conversely, methods that rely only on warm starts and hints without effective constraint management offer little to no acceleration, underscoring that managing the complexity of N-1 security is the primary driver of performance.
-
-The ECDF plot in Fig.~\ref{fig:ecdf}, which contains the most effective methods, illustrates these patterns. High-threshold pruning (PRUNE-0.10) provides consistent gains across the majority of instances. In contrast, the lazy enforcement methods, particularly the adaptive bandit variant, achieve the largest speedups on the most difficult instances, with many runs exceeding a 10x speedup.
-
-These trends are confirmed by the wall-clock runtime statistics in Tab.~\ref{tab:runtime}. For case118, the median time dropped from 43.40 seconds (RAW) to 4.84 seconds with LAZY+BANDIT. For the largest case, case300, the median runtime improved from 189.90 seconds to just 15 seconds with the same lazy method. Across several cases, we observed an interesting outcome: moderately aggressive pruning can solve instances that the RAW baseline fails on within the time limit. This is because the significantly reduced problem size allows the solver to explore the search tree more effectively and find a feasible integer solution faster. This highlights a complex trade-off between the initial model size and the solver's search efficiency.
-
-
-
-
 \begin{figure*}
-    \centering
-    \includegraphics[width=0.8\linewidth]{plots/ecdf.png}
-    \caption{Caption}
-    \label{fig:ecdf}
+  \centering
+  \includegraphics[width=0.7\textwidth]{Speedup_general.png}
+  \caption{Aggregate speedup distribution across all test cases.}
+  \label{fig:Speedup_general}
 \end{figure*}
 
+\paragraph{Branching Guidance (HINTS, COMMIT)}
+Beyond providing an initial feasible solution, machine learning models can be used to guide the solver's branching decisions. A straightforward technique, labeled HINTS, directly translates the binary commitment values from a warm-start solution into branching hints for the solver. This is achieved by setting the VarHintVal (Gurobi attribute) for each commitment variable. This is achieved by setting the VarHintVal attribute for each commitment variable, with a time-biased branching priority assigned to encourage the solver to explore decisions in early time periods first.
 
 
+A more sophisticated approach, COMMIT, uses a dedicated classifier to predict commitment probabilities, which inform the solver's search strategy. A Gradient Boosted Decision Tree (GBDT) is trained on historical data to estimate the probability that a generator $g$ is committed at time $t$, $\hat{p}_{g,t}=\Pr[u_{g,t}=1\mid x_{g,t}]$, given a feature vector $x_{g,t}$. The feature set is restricted to inputs available before the solve, including normalized system load, time index, generator capacity limits relative to system scale, ramp and start-up limits, and initial status. At inference, the predicted probabilities are used to configure multiple solver parameters to guide the search:
+\begin{align}
+\texttt{Start}(u_{g,t})&=\mathbb{I}\{\hat{p}_{g,t}\ge 0.5\}, \\
+\texttt{VarHintVal}(u_{g,t})&=\texttt{Start}(u_{g,t}).
+\end{align}
+This configuration provides an initial guess (Start), a hint value (VarHintVal), and prioritizes branching on variables corresponding to earlier time periods. The GBDT classifier is implemented using CatBoost, configured with 500 iterations, a learning rate of 0.06, and a tree depth of 6.
 
+\section{Computational Experiments}
 
+\begin{figure*}
+  \centering
+\includegraphics[width=0.8\linewidth]{ecdf.png}
+\caption{Distribution function of relative speed-up.}
+\label{fig:ecdf}
+\end{figure*}
 
-\begin{table*}[t]
-\centering
-\caption{Global runtime statistics (median [min--max])}
+\begin{table*}
 \label{tab:runtime}
 \renewcommand{\arraystretch}{1.2}
-\begin{tabularx}{0.9\textwidth}{|l||X|X|X|X|}
-\hline
+\footnotesize
+\caption{Global runtime statistics (median [min--max])}
+\begin{tabular}{|l||c|c|c|c|c|c|c|c|c|}\hline
 \textbf{Case} & \textbf{RAW} & \textbf{WARM+LAZY+BANDIT} & \textbf{WARM+PRUNE-0.10} & \textbf{OTHER} \\ \hline \hline
 case14 & 0.08 [0.06 - 0.13] & 0.05 [0.03 - 0.07] & 0.06 [0.04 - 0.11] & 0.07 [0.03 - 0.17] \\ \hline
 case30 & 0.15 [0.12 - 0.22] & 0.08 [0.06 - 0.17] & 0.11 [0.06 - 0.19] & 0.12 [0.06 - 0.26] \\ \hline
@@ -619,8 +342,32 @@ case57 & 0.65 [0.54 - 0.77] & 0.11 [0.08 - 0.20] & 0.12 [0.08 - 0.22] & 0.29 [0.
 case89pegase & 12.31 [9.19 - 16.84] & 0.97 [0.75 - 1.37] & 0.49 [0.33 - 0.84] & 4.90 [0.35 - 16.24] \\ \hline
 case118 & 43.40 [25.79 - 66.25] & 4.84 [3.74 - 7.67] & 5.69 [3.27 - 20.86] & 23.96 [3.12 - 96.22] \\ \hline
 case300 & 189.90 [135.81 - 393.03] & 15.00 [11.32 - 20.48] & 22.12 [13.17 - 33.90] & 92.45 [11.26 - 397.51] \\ \hline
-\end{tabularx}
+\end{tabular}
 \end{table*}
+
+All computational experiments were conducted using the Gurobi 12.1 solver on a machine equipped with an AMD Ryzen 7840HS processor and 32 GB of RAM. The benchmark suite consisted of six MATPOWER cases from the UnitCommitment repository \cite{Xavier2024}, which were used to formulate a multi-period DC-SCUC with full N-1 security constraints (cases 14, 30, 57, 89pegase, 118 and 300).
+
+For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing, respectively. Only the test split was used for all reported results. The speedups were measured relative to a baseline RAW mode, which represented a complete MILP optimization solved without acceleration techniques. Performance was analyzed using the empirical cumulative distribution function (ECDF) of per-instance speedups.
+
+
+7,702 solver runs were performed across 25 acceleration modes on a final test set of 327 unique problem instances. Total runtime was 73.5 hours. Of these runs, 93.9\% finished with an optimal solution, 4.2\% were infeasible, and 1.9\% terminated due to the time limit.
+
+At the instance level, 95.7\% of the unique instances were solved optimally at least once by one of the tested modes. Smaller cases (14-89 pegase) had a 60-second time limit, while larger cases had a 600-second limit. The training and validation sets were solved over a week.
+
+
+The robustness of each method is detailed in Tab.~\ref{tab:optimal_cases}. This table reports the percentage of instances solved optimally, found infeasible, or timed out. All variants using lazy enforcement or constraint pruning achieved perfect or near-perfect optimality rates across all test cases.
+
+In contrast, the baseline methods are less robust on larger systems. For the current sampled case300 campaign, the most reliable exact large-case performers are WARM+LAZY, ACTIVESET+LAZY, and STREDUCE+LAZY+GRU, each of which maintained full verified feasibility on the available runs.
+\iffalse
+ In addition, the least aggressive pruning strategy (identifying redundant constraints) sometimes fails to find an optimal solution for case 300, as shown in the table. This suggests that overly aggressive pruning may remove correct constraints. Also warm start methods and branching hints may provide start solutions which leads to time limit solver aborting. 
+
+\fi
+The speedup factors relative to the RAW baseline are summarized in Tab.~\ref{tab:speedup} and Fig.~\ref{fig:Speedup_general}. The best result for each case is highlighted in bold. The results are case-dependent: pruning remains very effective on several medium-size systems, while plain lazy enforcement is the safest exact winner on the currently sampled large instances. Methods that rely only on warm starts and hints without effective constraint management offer much smaller gains, underscoring that managing the complexity of N-1 security is the primary driver of performance.
+By comparison, some more aggressive screening hybrids reduced runtime further on selected instances but did not preserve the same verification profile. This suggests that large-system speedups should be judged jointly by runtime and post-solve verification, not by runtime alone.
+
+The ECDF plot in Fig.~\ref{fig:ecdf}, which contains the most effective methods, illustrates these patterns. High-threshold pruning (PRUNE-0.10) provides consistent gains across the majority of instances. In contrast, the lazy enforcement methods, particularly the adaptive bandit variant, achieve the largest speedups on the most difficult instances, with many runs exceeding a 10x speedup.
+
+These trends are confirmed by the wall-clock runtime statistics in Tab.~\ref{tab:runtime}. For case118, the median time dropped from 43.40 seconds (RAW) to 4.84 seconds with LAZY+BANDIT. For the largest case, case300, the median runtime improved from 189.90 seconds to just 15 seconds with the same lazy method. Across several cases, we observed an interesting outcome: moderately aggressive pruning can solve instances that the RAW baseline fails on within the time limit. This is because the significantly reduced problem size allows the solver to explore the search tree more effectively and find a feasible integer solution faster. This highlights a complex trade-off between the initial model size and the solver's search efficiency.
 
 
 \section{Conclusion}
@@ -639,48 +386,95 @@ Future work will focus on adapting screening thresholds online, coupling screeni
 \begin{thebibliography}{99}
 
 \bibitem{Merlin1983}
-A.~Merlin and P.~Sandrin, A new method for unit commitment at Electricité de France,'' \emph{IEEE Trans. Power App. Syst.}, vol.~PAS-102, no.~5, pp.~1218--1225, May 1983. 
+A.~Merlin and P.~Sandrin, A new method for unit commitment at Electricité de France,'' \emph{IEEE Trans. Power App. Syst.}, vol.~PAS-102, no.~5, pp.~1218--1225, May 1983. 
 
 \bibitem{Carrion2006} M.~Carrión and J.~M. Arroyo, A computationally efficient mixed-integer linear formulation for the thermal unit commitment problem,'' \emph{IEEE Trans. Power Syst.}, vol.~21, no.~3, pp.~1371--1378, Aug. 2006, doi: 10.1109/TPWRS.2006.876672.
 
 \bibitem{Ostrowski2012}
-J.~Ostrowski, M.~F. Anjos, and A.~Vannelli, Tight mixed-integer linear programming formulations for the unit commitment problem,'' \emph{IEEE Trans. Power Syst.}, vol.~27, no.~1, pp.~39--46, Feb. 2012. 
+J.~Ostrowski, M.~F. Anjos, and A.~Vannelli, Tight mixed-integer linear programming formulations for the unit commitment problem,'' \emph{IEEE Trans. Power Syst.}, vol.~27, no.~1, pp.~39--46, Feb. 2012. 
 
-\bibitem{Morales2013} J.~M. Morales, A.~J. Conejo, H.~Madsen, P.~Pinson, and M.~Zugno, \emph{Integrating Renewables in Electricity Markets: Operational Problems}. New York, NY, USA: Springer, 2013. 
+\bibitem{Morales2013} J.~M. Morales, A.~J. Conejo, H.~Madsen, P.~Pinson, and M.~Zugno, \emph{Integrating Renewables in Electricity Markets: Operational Problems}. New York, NY, USA: Springer, 2014. 
 
 \bibitem{Pan2016} K.~Pan and Y.~Guan, A polyhedral study of the ramp-up/down constrained unit commitment problem,'' \emph{Math. Program.}, vol.~157, no.~1, pp.~79--113, 2016.
 
 \bibitem{Christie2000}
-R.~D. Christie, B.~F. Wollenberg, and I.~Wangensteen, Transmission management in the deregulated environment,'' \emph{Proc. IEEE}, vol.~88, no.~2, pp.~170--195, Feb. 2000, doi: 10.1109/5.823997. 
+R.~D. Christie, B.~F. Wollenberg, and I.~Wangensteen, Transmission management in the deregulated environment,'' \emph{Proc. IEEE}, vol.~88, no.~2, pp.~170--195, Feb. 2000, doi: 10.1109/5.823997. 
 
 \bibitem{Tejada2018} D.~A. Tejada-Arango, P.~Sánchez-Martín, and A.~Ramos, Security constrained unit commitment using line outage distribution factors,'' \emph{IEEE Trans. Power Syst.}, vol.~33, no.~1, pp.~329--337, Jan. 2018.
-\bibitem{Knueven2018}
-B.~Knueven, J.-P.~P. Richard, and S.~S. Oren, A nested Benders decomposition for the unit commitment problem with AC power flow constraints,'' \emph{EURO J. Comput. Optim.}, vol.~6, no.~1, pp.~75--103, 2018. 
 
 \bibitem{Holzer2024} J.~T. Holzer, Y.~Chen, Z.~Wu, F.~Pan, and A.~Veeramany, Fast simultaneous feasibility test for security constrained unit commitment,'' \emph{IEEE Trans. Power Syst.}, vol.~39, no.~1, pp.~1068--1078, Jan. 2024, doi: 10.1109/TPWRS.2023.3265269.
 
 
 \bibitem{Bengio2021}
-Y.~Bengio, A.~Lodi, and A.~Prouvost, Machine learning for combinatorial optimization: A methodological tour d'horizon,'' \emph{Eur. J. Oper. Res.}, vol.~290, no.~2, pp.~405--421, Apr. 2021. 
+Y.~Bengio, A.~Lodi, and A.~Prouvost, Machine learning for combinatorial optimization: A methodological tour d'horizon,'' \emph{Eur. J. Oper. Res.}, vol.~290, no.~2, pp.~405--421, Apr. 2021. 
 
-\bibitem{Xavier2019} Á.~S. Xavier, F.~Qiu, and S.~Ahmed, Learning to Solve Large-Scale Security-Constrained Unit Commitment Problems,'' \emph{arXiv preprint} arXiv:1902.01697, 2019. [Online]. Available: \url{https://arxiv.org/abs/1902.01697}
+\bibitem{Xavier2019} Á.~S. Xavier, F.~Qiu, and S.~Ahmed, Learning to Solve Large-Scale Security-Constrained Unit Commitment Problems,'' \emph{INFORMS J. Comput.}, vol.~33, no.~2, pp.~739--756, 2021, doi: 10.1287/ijoc.2020.0976. 
 
 \bibitem{Quarm2021}
-E.~Quarm and R.~Madani, Scalable security-constrained unit commitment under uncertainty via cone programming relaxation,'' \emph{IEEE Trans. Power Syst.}, vol.~36, no.~5, pp.~4733--4744, Sept. 2021, doi: 10.1109/TPWRS.2021.3062203. 
+E.~Quarm and R.~Madani, Scalable security-constrained unit commitment under uncertainty via cone programming relaxation,'' \emph{IEEE Trans. Power Syst.}, vol.~36, no.~5, pp.~4733--4744, Sept. 2021, doi: 10.1109/TPWRS.2021.3062203. 
 
-\bibitem{Donti2021} P.~Donti, B.~Amos, Z.~D. Davis, and J.~Z. Kolter, DC3: A learning method for optimizing transmission switching in DC optimal power flow,'' \emph{arXiv preprint} arXiv:2104.12225, 2021. [Online]. Available: \url{https://arxiv.org/abs/2104.12225}
+\bibitem{Donti2021} P.~Donti, D.~Rolnick, and J.~Z. Kolter, DC3: A learning method for optimization with hard constraints,'' \emph{arXiv preprint} arXiv:2104.12225, 2021. [Online]. Available: \url{https://arxiv.org/abs/2104.12225}
 
 \bibitem{JimenezCordero2022}
-A.~Jiménez-Cordero, J.~M. Morales, and S.~Pineda, Warm-starting constraint generation for mixed-integer optimization: A machine learning approach,'' \emph{Knowledge-Based Systems}, vol.~253, p.~109570, Oct. 2022, doi: 10.1016/j.knosys.2022.109570.Oct. 2022, doi: 10.1016/j.knosys.2022.109570.
-
+A.~Jiménez-Cordero, J.~M. Morales, and S.~Pineda, Warm-starting constraint generation for mixed-integer optimization: A machine learning approach,'' \emph{Knowledge-Based Systems}, vol.~253, p.~109570, Oct. 2022, doi: 10.1016/j.knosys.2022.109570, Oct. 2022.
 
 \bibitem{Xavier2024}
 A.~S. Xavier, A.~M. Kazachkov, O.~Yurdakul, J.~He, and F.~Qiu, ``UnitCommitment.jl (v0.4),'' Zenodo, 2024. [Online]. Available: \url{https://doi.org/10.5281/zenodo.4269874}, \url{https://axavier.org/UnitCommitment.jl/0.4/instances}.
 
+
+\bibitem{Porras2023}
+A.~Porras, S.~Pineda, J.~M. Morales, and A.~Jim\'{e}nez-Cordero,
+``Cost-driven screening of network constraints for the unit commitment
+problem,'' \emph{IEEE Trans. Power Syst.}, vol.~38, no.~1, pp.~42--51,
+Jan. 2023, doi: 10.1109/TPWRS.2022.3181093.
+
+\bibitem{Pineda2020}
+S.~Pineda, J.~M. Morales, and A.~Jim\'{e}nez-Cordero,
+``Data-driven screening of network constraints for unit commitment,'' \emph{IEEE Trans.
+Power Syst.}, vol.~35, no.~5, pp.~3695--3705, Sep. 2020,
+doi: 10.1109/TPWRS.2020.2980212.
+
+\bibitem{He2024screening}
+X.~He, H.~Wen, Y.~Zhang, Y.~Chen, and D.~H.~K. Tsang,
+``Efficient unit commitment constraint screening under uncertainty,'' \emph{arXiv preprint}
+arXiv:2408.05185, 2024. [Online]. Available:
+\url{https://arxiv.org/abs/2408.05185}
+
+
+\bibitem{Hasan2023}
+F.~Hasan and A.~Kargarian,
+``Accelerating L-shaped two-stage stochastic {SCUC} with learning integrated
+Benders decomposition,'' \emph{arXiv preprint} arXiv:2311.10835, 2023.
+[Online]. Available: \url{https://arxiv.org/abs/2311.10835}
+
+\bibitem{Nakiganda2023}
+A.~M. Nakiganda and S.~Chatzivasileiadis,
+``Graph neural networks for fast contingency analysis of power systems,'' \emph{arXiv preprint}
+arXiv:2310.04213, 2023. [Online]. Available:
+\url{https://arxiv.org/abs/2310.04213}
+
+\bibitem{Tuo2023}
+A.~V. Ramesh and X.~Li,
+``Spatio-temporal deep learning-assisted reduced security-constrained unit
+commitment,'' \emph{arXiv preprint} arXiv:2306.01570, 2023. [Online]. Available:
+\url{https://arxiv.org/abs/2306.01570}
+
+\bibitem{Wu2024}
+J.~Wu, P.~B. Luh, Y.~Chen, B.~Yan, and M.~A. Bragin,
+``Synergistic integration of machine learning and mathematical optimization
+for unit commitment,'' \emph{IEEE Trans. Power Syst.}, vol.~39, no.~1,
+pp.~929--942, Jan. 2024, doi: 10.1109/TPWRS.2023.3238054.
+
+\bibitem{Xavier2020CF} A.~S. Xavier, F.~Qiu, F.~Wang, and P.~R. Thimmapuram, ``Transmission constraint filtering in large-scale security-constrained unit commitment,'' \emph{IEEE Trans. Power Syst.}, vol.~35, no.~2, pp.~1032--1042, Mar. 2020, doi: 10.1109/TPWRS.2019.2892620.
+
+\bibitem{Castelli2024b}A.~F. Castelli, I.~Harjunkoski, J.~Poland, M.~Giuntoli, E.~Martelli, and I.~E. Grossmann, ``Solving the security constrained unit commitment problem: Three novel approaches,'' \emph{Int. J. Electr. Power Energy Syst.}, vol.~162, p.~110213, Nov. 2024, doi: 10.1016/j.ijepes.2024.110213.
+
+\bibitem{Qiu2022} Y.~Chen, F.~Pan, F.~Qiu, A.~S. Xavier, T.~Zheng, M.~Marwali, B.~Knueven, Y.~Guan, P.~B. Luh, and L.~Wu, ``Security-constrained unit commitment for electricity market: Modeling, solution methods, and future challenges,'' \emph{IEEE Trans. Power Syst.}, vol.~38, no.~5, pp.~3929--3941, Sep. 2023, doi: 10.1109/TPWRS.2022.3213001.
 \end{thebibliography}
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{Grishin.jpg}}]{Egor Grishin} received the B.Sc. and M.Sc. degrees in physics from Lomonosov Moscow State University, Moscow, Russia, in 2022, and is currently pursuing the Ph.D. degree with the Center for Energy Science and Technology, Moscow, Russia.
 
-
-
+From 2018 to 2024, he was a Researcher with the Institute of Control Sciences of the Russian Academy of Sciences, laboratory of scheduling theory and discrete optimization. Since 2023, he has been the CEO of Axiom Analytics, Moscow, Russia, and since 2024, an Optimization Engineer with the Quantum Technology Center, Moscow, Russia. His research interests include mathematical optimization, scheduling, and power-system applications, including power flow and security-constrained unit commitment.
+\end{IEEEbiography}
+\EOD
 \end{document}
-
 

@@ -51,16 +51,18 @@ def _scalar(val, default=None):
 
 
 def _parse_version(v):
-    """Return (major, minor) tuple; treat malformed strings as (0, 0)."""
-    try:
-        return tuple(int(x) for x in str(v).split(".")[:2])
-    except Exception:
-        return (0, 0)
+    """Return (major, minor) tuple parsed from '<major>.<minor>[.<patch>]...'."""
+    parts = str(v).split(".")
+    if len(parts) < 2:
+        raise ValueError(
+            f"Unsupported version format '{v}'. Expected '<major>.<minor>' (optionally with patch)."
+        )
+    return int(parts[0]), int(parts[1])
 
 
 def migrate(json_: dict) -> None:
     """
-    Bring legacy (< 0.4) files up to date:
+    Validate input schema version (minimum supported version is 0.4):
         * v0.2 → v0.3:  restructure reserves & generator flags
         * v0.3 → v0.4:  ensure every generator has `"Type": "Thermal"`
     """
@@ -69,14 +71,19 @@ def migrate(json_: dict) -> None:
     if ver_raw is None:
         raise ValueError(
             "Input file has no Parameters['Version'] entry – please add it "
-            '(e.g. {"Parameters": {"Version": "0.3"}}).'
+            '(e.g. {"Parameters": {"Version": "0.4"}}).'
         )
 
     ver = _parse_version(ver_raw)
+    if ver >= (0, 4):
+        return
+    if ver < (0, 2):
+        raise ValueError(f"Unsupported input version '{ver_raw}'.")
     if ver < (0, 3):
         _migrate_to_v03(json_)
-    if ver < (0, 4):
-        _migrate_to_v04(json_)
+    _migrate_to_v04(json_)
+    params = json_.setdefault("Parameters", {})
+    params["Version"] = "0.4"
 
 
 def _migrate_to_v03(json_: dict) -> None:
@@ -294,15 +301,39 @@ def from_json(j: dict, quiet: bool = False) -> UnitCommitmentScenario:
                 if init_p and init_p > 0 and init_s <= 0:
                     raise ValueError(f"{uname} initial power >0 but status <=0")
 
-            # Ramp and limits validation
-            ramp_up = _scalar(
+            # Ramp limits occasionally arrive as zero/negative in some large
+            # benchmark instances. Repair them deterministically to a
+            # non-binding but finite value derived from the unit's capacity.
+            ramp_up_raw = _scalar(
                 udict.get("Ramp up limit (MW)"), DataParams.DEFAULT_RAMP_UP_MW
             )
-            ramp_down = _scalar(
+            ramp_down_raw = _scalar(
                 udict.get("Ramp down limit (MW)"), DataParams.DEFAULT_RAMP_DOWN_MW
             )
-            if ramp_up <= 0 or ramp_down <= 0:
-                raise ValueError(f"Invalid ramp limits for '{uname}'")
+            pmax_max = float(max(max_power)) if max_power else 0.0
+            feasible_ramp = max(
+                pmax_max,
+                float(DataParams.DEFAULT_RAMP_UP_MW),
+                float(DataParams.DEFAULT_RAMP_DOWN_MW),
+            )
+            ramp_up = float(ramp_up_raw)
+            ramp_down = float(ramp_down_raw)
+            if (not np.isfinite(ramp_up)) or ramp_up <= 0:
+                logger.warning(
+                    "Repairing invalid ramp_up for '%s': raw=%r -> %.6f",
+                    uname,
+                    ramp_up_raw,
+                    feasible_ramp,
+                )
+                ramp_up = feasible_ramp
+            if (not np.isfinite(ramp_down)) or ramp_down <= 0:
+                logger.warning(
+                    "Repairing invalid ramp_down for '%s': raw=%r -> %.6f",
+                    uname,
+                    ramp_down_raw,
+                    feasible_ramp,
+                )
+                ramp_down = feasible_ramp
 
             commitment_status = ts(
                 udict.get("Commitment status"),

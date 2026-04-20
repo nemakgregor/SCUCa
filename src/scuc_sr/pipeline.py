@@ -402,7 +402,7 @@ def main():
         val_ratio=args.val_ratio,
         split_seed=args.seed,
     )
-    rc_ok, _ = rc.ensure_trained(case_folder, allow_build_if_missing=False)
+    rc_ok, _ = rc.ensure_trained(case_folder)
 
     gurobi_log = logs_root / run_log_name
     evt_log = logs_root / pipeline_log_name

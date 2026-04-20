@@ -23,7 +23,7 @@ Highlights
 - Then install the Python packages:
 
 ```bash
-pip install gurobipy numpy scipy requests tqdm scikit-learn torch torch-geometric
+pip install -r requirements.txt
 ```
 
 3) Solve selected instances in batch and save JSON outputs
@@ -70,7 +70,7 @@ Run:
 
 ```bash
 # Compare on case57 with default splits (70/15/15) and common limits
-python -m src.optimization_model.SCUC_solver.compare_warm_start \
+python -m src.optimization_model.SCUC_solver.compare_ml_raw \
   --case matpower/case57 \
   --time-limit 600 --mip-gap 0.05 \
   --train-ratio 0.70 --val-ratio 0.15 \
@@ -78,10 +78,33 @@ python -m src.optimization_model.SCUC_solver.compare_warm_start \
 ```
 
 Notes:
-- The script downloads instances as needed, saves raw JSON solutions to src/data/output, builds a warm-start index from TRAIN outputs, and then evaluates warm vs raw on TEST.
-- It saves a CSV with per-instance results under:
-  src/data/output/<case_folder>/compare_matpower_case57_<timestamp>.csv
+- The script downloads instances as needed, saves raw JSON solutions to `src/data/output`, builds a warm-start index from TRAIN outputs, and then evaluates warm vs raw on TEST.
+- It saves CSV logs under:
+  `src/data/logs/compare_logs_<case>_<timestamp>.csv`
+- Feasibility for warm-start runs is verified using the built-in checker. If slacks are enabled, the checker validates the slack-augmented model rather than a strict no-slack formulation.
 - “Feasibility” for warm-start runs is verified using the built-in checker (no strict feasibility if slacks are used; the checker ensures constraints are respected given slacks).
+
+## Paper experiments pipeline
+
+For the publication-oriented benchmark suite under `src/paper`:
+
+```bash
+python -m src.paper.experiments --save-human-logs
+python -m src.paper.analysis
+python -m src.paper.plots
+python -m src.paper.tables
+```
+
+Notes:
+- Canonical training outputs remain under `src/data/output`.
+- Experiment-run solutions are isolated under `results/solutions/<mode>/...` to avoid overwriting the training database.
+- Aggregated paper metrics use end-to-end per-run time (`runtime_report_sec`, falling back to `wall_sec`).
+- If `results/raw_logs` is empty, `analysis.py` automatically falls back to `results_prev/raw_logs` for read-only reproducibility checks.
+
+Method semantics used in paper artifacts:
+- `RAW`, `WARM`, `WARM+LAZY`, `PRUNE`, `LPSCREEN`, `ACTIVESET`, `ACTIVESET+LAZY`, `STREDUCE`, `STREDUCE+LAZY` are treated as exact MILP-based methods.
+- `SHRINK+LAZY` is a shrinking-horizon approximation and is marked as heuristic (`^\dagger`) in tables/plots.
+- If ST-reduction actually uses GRU warm start at run time, the logged mode label is suffixed with `+GRU` (for transparent comparisons).
 
 ## Warm-start tools
 
@@ -219,13 +242,32 @@ Example mapping:
 - src/optimization_model/SCUC_solver
   - scuc_model_builder.py: builds a segmented SCUC by composing modular components
   - optimizer.py: simple solver CLI (all options OFF by default, logs OFF by default)
-  - compare_warm_start.py: pipeline to benchmark warm-start vs raw on train/test splits
   - compare_ml_raw.py: pipeline to evaluate raw vs warm and export CSVs (this doc lists all its CLI options)
   - solve_instances.py: batch solver (remote listing, download, solve, JSON save)
   - fix_warm_start.py (in ml_models): repair/generate robust warm-start JSONs
+- src/paper
+  - experiments.py: publication benchmark driver across RAW/WARM/HINTS/LAZY/PRUNE/LPSCREEN/SR+LAZY/ACTIVESET/SHRINK/STREDUCE families
+  - analysis.py: deduplicates raw logs and builds summary/effect-size CSVs
+  - plots.py: renders figures from merged results
+  - tables.py: writes LaTeX-ready tables from aggregated outputs
 - src/ml_models
   - warm_start.py: k-NN warm-start provider (pretrain, generate warm files, apply to model)
   - pretrain_warm_start.py: convenience tool to prebuild per-case indexes
 - src/optimization_model/helpers
   - save_json_solution.py: serialize solutions as JSON under src/data/output
   - verify_solution.py: verify model solution (in-memory) and write a report if requested
+
+## Publication checklist
+
+- Re-run benchmark logs into `results/raw_logs` before final manuscript export.
+- Rebuild artifacts with:
+  - `python -m src.paper.analysis`
+  - `python -m src.paper.plots`
+  - `python -m src.paper.tables`
+- Ensure the generated `results/tables/*.tex` and `results/figures/*` match the manuscript claims.
+- Keep exact and heuristic methods separated in discussion:
+  - exact: all modes except `SHRINK+LAZY`
+  - heuristic: `SHRINK+LAZY`
+- Include repository metadata files in release:
+  - `LICENSE`
+  - `CITATION.cff`

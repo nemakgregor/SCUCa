@@ -41,15 +41,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-
-try:
-    from torch_geometric.data import Data as GeoData
-    from torch_geometric.loader import DataLoader
-    from torch_geometric.nn import SAGEConv
-
-    HAVE_PYG = True
-except Exception:
-    HAVE_PYG = False
+from torch_geometric.data import Data as GeoData
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import SAGEConv
 
 import networkx as nx
 
@@ -126,8 +120,21 @@ def _build_line_graph(sc) -> Tuple[nx.Graph, Dict[str, int]]:
     return G, idx_by_line
 
 
-def _node_features(sc) -> Tuple[np.ndarray, Dict[str, int]]:
-    # Build features per line: [susceptance, mean_Fn, mean_Fe, deg_src, deg_tgt, load_src_mean, load_tgt_mean]
+def _node_features(sc, include_temporal: bool = True) -> Tuple[np.ndarray, Dict[str, int]]:
+    """
+    Build features per line (node in the line graph).
+
+    Static (7 features):
+      susceptance, mean_Fn, mean_Fe, deg_src, deg_tgt, load_src_mean, load_tgt_mean
+
+    Temporal (4 additional features when include_temporal=True):
+      load_src_peak, load_tgt_peak, load_src_std, load_tgt_std
+
+    The temporal features make the model instance-aware: different load profiles
+    produce different features, enabling the GNN to adapt its criticality
+    predictions to the specific operating conditions. This is inspired by
+    the GNN+LSTM approach in rpglab/GNN-LSTM_C-V-R-SCUC.
+    """
     Gbus = nx.Graph()
     for b in sc.buses:
         Gbus.add_node(b.index)
@@ -136,6 +143,9 @@ def _node_features(sc) -> Tuple[np.ndarray, Dict[str, int]]:
     deg = dict(Gbus.degree())
 
     load_mean = {b.index: float(np.mean([float(x) for x in b.load])) for b in sc.buses}
+    load_peak = {b.index: float(np.max([float(x) for x in b.load])) for b in sc.buses}
+    load_std = {b.index: float(np.std([float(x) for x in b.load])) for b in sc.buses}
+
     feats = []
     idx_map = {}
     for i, ln in enumerate(sc.lines):
@@ -147,9 +157,16 @@ def _node_features(sc) -> Tuple[np.ndarray, Dict[str, int]]:
         dt = float(deg.get(ln.target.index, 0))
         ls = float(load_mean.get(ln.source.index, 0.0))
         lt = float(load_mean.get(ln.target.index, 0.0))
-        feats.append([susc, F_n, F_e, ds, dt, ls, lt])
+        row = [susc, F_n, F_e, ds, dt, ls, lt]
+        if include_temporal:
+            row.extend([
+                float(load_peak.get(ln.source.index, 0.0)),
+                float(load_peak.get(ln.target.index, 0.0)),
+                float(load_std.get(ln.source.index, 0.0)),
+                float(load_std.get(ln.target.index, 0.0)),
+            ])
+        feats.append(row)
     X = np.array(feats, dtype=float)
-    # Normalize crude
     if X.size > 0:
         mean = X.mean(axis=0)
         std = X.std(axis=0) + 1e-9
@@ -206,10 +223,7 @@ class GNNLineScreener:
         self.meta_path = (self.base_dir / "meta.json").resolve()
         self.model: Optional[_LineSAGE] = None
 
-    def _build_dataset(self) -> Optional[List[GeoData]]:
-        if not HAVE_PYG:
-            print("[gnn_screen] torch-geometric not available; cannot train.")
-            return None
+    def _build_dataset(self, restrict_to_names: Optional[set] = None) -> Optional[List[GeoData]]:
         outs = _list_outputs(self.case)
         if not outs:
             return None
@@ -219,6 +233,8 @@ class GNNLineScreener:
             if not out:
                 continue
             name = _instance_name_from_output(op)
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
             try:
                 inst = read_benchmark(name, quiet=True)
                 sc = inst.deterministic
@@ -253,18 +269,32 @@ class GNNLineScreener:
         lr: float = 1e-3,
         batch_size: int = 1,
         force: bool = False,
+        seed: int = 42,
+        restrict_to_names: Optional[set] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        data_list = self._build_dataset()
+        data_list = self._build_dataset(restrict_to_names=restrict_to_names)
         if not data_list:
             print("[gnn_screen] No data to train.")
             return None
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         in_dim = data_list[0].x.shape[1]
         model = _LineSAGE(in_dim=in_dim, hidden=64)
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         loss_fn = nn.BCELoss()
-        loader = DataLoader(data_list, batch_size=batch_size, shuffle=True)
+        generator = torch.Generator().manual_seed(seed)
+        loader = DataLoader(
+            data_list,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=generator,
+        )
         model.train()
         for e in range(epochs):
             tot = 0.0
@@ -289,19 +319,16 @@ class GNNLineScreener:
         if self.model is not None:
             return True
         if self.model_path.exists():
-            try:
-                meta = (
-                    json.loads(self.meta_path.read_text(encoding="utf-8"))
-                    if self.meta_path.exists()
-                    else {}
-                )
-                in_dim = int(meta.get("in_dim", 7))
-                m = _LineSAGE(in_dim=in_dim, hidden=64)
-                m.load_state_dict(torch.load(self.model_path, map_location="cpu"))
-                self.model = m.eval()
-                return True
-            except Exception:
-                return False
+            meta = (
+                json.loads(self.meta_path.read_text(encoding="utf-8"))
+                if self.meta_path.exists()
+                else {}
+            )
+            in_dim = int(meta.get("in_dim", 7))
+            m = _LineSAGE(in_dim=in_dim, hidden=64)
+            m.load_state_dict(torch.load(self.model_path, map_location="cpu"))
+            self.model = m.eval()
+            return True
         return False
 
     def _predict_scores_for_instance(self, sc) -> Dict[str, float]:

@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+title: "Learning-Enhanced Security-Constrained Unit Commitment"
+message: "If you use this repository, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: "Grishin"
+    given-names: "Egor"
+    affiliation: "Skoltech"
+repository-code: "https://github.com/egorgr/SCUCa"
+license: "MIT"
+abstract: >
+  Research code for ML-enhanced and exact/heuristic benchmarking pipelines
+  for DC-SCUC with PTDF/LODF-based N-1 security enforcement.
+keywords:
+  - SCUC
+  - unit commitment
+  - optimization
+  - power systems
+  - machine learning
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Grishin"
+      given-names: "Egor"
+  title: "Learning-Enhanced Security-Constrained Unit Commitment Problem"
+  year: 2026
+  journal: "PSCC 2026 (manuscript)"

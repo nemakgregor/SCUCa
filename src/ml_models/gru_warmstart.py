@@ -91,7 +91,7 @@ class GRUDispatchWarmStart:
         self.meta_path = (self.base_dir / "meta.json").resolve()
         self.model: Optional[_GRU] = None
 
-    def _build_training(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def _build_training(self, restrict_to_names: Optional[set] = None) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         outs = _list_outputs(self.case)
         X_seq = []
         Y_seq = []
@@ -102,6 +102,8 @@ class GRUDispatchWarmStart:
             name = op.resolve().relative_to(DataParams._OUTPUT.resolve()).as_posix()
             if name.endswith(".json"):
                 name = name[:-5]
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
             try:
                 inst = read_benchmark(name, quiet=True)
                 sc = inst.deterministic
@@ -161,14 +163,22 @@ class GRUDispatchWarmStart:
         return Xb, Yb
 
     def pretrain(
-        self, epochs: int = 60, lr: float = 2e-3, force: bool = False
+        self, epochs: int = 30, lr: float = 2e-3, force: bool = False, seed: int = 42,
+        patience: int = 6, min_delta: float = 1e-4,
+        restrict_to_names: Optional[set] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        data = self._build_training()
+        data = self._build_training(restrict_to_names=restrict_to_names)
         if data is None:
             print("[gru_ws] No training data found.")
             return None
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         Xb, Yb = data  # [N, T, 5], [N, T]
         model = _GRU(in_dim=Xb.shape[2], hidden=32, layers=2)
         opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -176,13 +186,34 @@ class GRUDispatchWarmStart:
         model.train()
         x = torch.tensor(Xb, dtype=torch.float32)
         y = torch.tensor(Yb, dtype=torch.float32)
+        best_loss = float("inf")
+        best_state = None
+        stalled_epochs = 0
         for e in range(epochs):
             opt.zero_grad()
             yhat = model(x)
             loss = loss_fn(yhat, y)
             loss.backward()
             opt.step()
-            print(f"[gru_ws] epoch {e:03d} | loss={float(loss.item()):.6f}")
+            loss_value = float(loss.item())
+            print(f"[gru_ws] epoch {e:03d} | loss={loss_value:.6f}")
+            if loss_value + float(min_delta) < best_loss:
+                best_loss = loss_value
+                best_state = {
+                    name: tensor.detach().cpu().clone()
+                    for name, tensor in model.state_dict().items()
+                }
+                stalled_epochs = 0
+            else:
+                stalled_epochs += 1
+                if stalled_epochs >= int(patience):
+                    print(
+                        f"[gru_ws] early stop at epoch {e:03d} "
+                        f"(best_loss={best_loss:.6f})"
+                    )
+                    break
+        if best_state is not None:
+            model.load_state_dict(best_state)
         torch.save(model.state_dict(), self.model_path)
         self.model = model.eval()
         meta = {"case_folder": self.case, "in_dim": int(Xb.shape[2])}

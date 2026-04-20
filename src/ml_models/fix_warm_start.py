@@ -619,7 +619,6 @@ def fix_warm_file(
     instance_name: str,
     warm_file: Optional[Path] = None,
     *,
-    require_pretrained: bool = False,
     use_train_db: bool = False,
 ) -> Optional[Path]:
     """
@@ -642,9 +641,7 @@ def fix_warm_file(
 
             cf = "/".join(name.strip().split("/")[:2])
             wsp = WarmStartProvider(case_folder=cf)
-            trained, cov = wsp.ensure_trained(
-                cf, allow_build_if_missing=not require_pretrained
-            )
+            trained, cov = wsp.ensure_trained(cf)
             if not trained:
                 print(
                     f"[fix_warm] No warm-start index available for {cf} (coverage={cov:.3f})."
@@ -654,7 +651,6 @@ def fix_warm_file(
                 name,
                 use_train_index_only=use_train_db,
                 exclude_self=True,
-                auto_fix=False,
             )
             if not warm_path or not Path(warm_path).exists():
                 print("[fix_warm] Failed to generate warm-start JSON.")
@@ -720,12 +716,6 @@ def main():
         help="Path to an existing warm JSON. If omitted, use default warm_<instance>.json (auto-generate if missing).",
     )
     ap.add_argument(
-        "--require-pretrained",
-        action="store_true",
-        default=False,
-        help="If auto-generating the warm JSON, require a pre-trained index.",
-    )
-    ap.add_argument(
         "--use-train-db",
         action="store_true",
         default=False,
@@ -736,7 +726,6 @@ def main():
     out = fix_warm_file(
         instance_name=args.instance,
         warm_file=Path(args.warm_file) if args.warm_file else None,
-        require_pretrained=args.require_pretrained,
         use_train_db=args.use_train_db,
     )
     if out is None:

@@ -12,9 +12,9 @@ from scipy.sparse import csc_matrix
 @dataclass
 class LazyContingencyConfig:
     # Numerical tolerances
-    lodf_tol: float = 1e-2
-    isf_tol: float = 1e-3
-    violation_tol: float = 1e-3  # add a constraint if viol > this
+    lodf_tol: float = 1e-4
+    isf_tol: float = 1e-8
+    violation_tol: float = 1e-6  # add a constraint if viol > this
 
     # Limit how many constraints we add per incumbent (0 => add all violated)
     add_top_k: int = 0
@@ -24,6 +24,12 @@ class LazyContingencyConfig:
 
     # Optional bandit policy (object with choose_k(context)->int, update(chosen_k,reward,context)->None)
     topk_policy: object = None
+
+    # Optional pair-level masks (set of (line_name, outage_name) tuples to keep)
+    keep_line_pairs: Optional[set] = None
+    keep_gen_pairs: Optional[set] = None
+    # Optional set of monitored line names to restrict checking
+    allowed_monitored_lines: Optional[set] = None
 
 
 def attach_lazy_contingency_callback(
@@ -37,7 +43,7 @@ def attach_lazy_contingency_callback(
     if not getattr(scenario, "contingencies", None) or not getattr(
         scenario, "lines", None
     ):
-        return
+        raise RuntimeError("[lazy_cont] Scenario must contain lines and contingencies.")
 
     commit = getattr(model, "commit", None)
     seg = getattr(model, "gen_segment_power", None)
@@ -77,6 +83,26 @@ def attach_lazy_contingency_callback(
 
     # Lock for thread-safe stats/counters (Gurobi may run callbacks multi-threaded)
     _lock = threading.Lock()
+
+    def _incr_line_added(line_name: str, k: int = 1) -> None:
+        if not line_name:
+            return
+        with _lock:
+            line_added_by_line[line_name] = line_added_by_line.get(line_name, 0) + int(k)
+
+    def _incr_pair_line(line_name: str, outage_name: str, k: int = 1) -> None:
+        if not line_name or not outage_name:
+            return
+        key = f"{line_name}|{outage_name}"
+        with _lock:
+            lazy_pair_line[key] = lazy_pair_line.get(key, 0) + int(k)
+
+    def _incr_pair_gen(line_name: str, gen_name: str, k: int = 1) -> None:
+        if not line_name or not gen_name:
+            return
+        key = f"{line_name}|{gen_name}"
+        with _lock:
+            lazy_pair_gen[key] = lazy_pair_gen.get(key, 0) + int(k)
 
     def _p_expr(gen, t: int) -> gp.LinExpr:
         expr = commit[gen.name, t] * float(gen.min_power[t])
@@ -300,26 +326,6 @@ def attach_lazy_contingency_callback(
     model._lazy_contingency_stats = stats
     model._lazy_contingency_callback = _cb
     model._lazy_contingency_attached = True
-    # For backward compatibility with any external code that might inspect these:
-    model._callback = _cb
-    model._has_callback = True
     model._lazy_added_line_by_line = line_added_by_line
     model._lazy_added_pair_line = lazy_pair_line
     model._lazy_added_pair_gen = lazy_pair_gen
-
-
-def optimize_with_lazy_callback(model: gp.Model) -> None:
-    """
-    Optimize *model* using the attached lazy-contingency callback if present.
-
-    If attach_lazy_contingency_callback() was called on this model, we call:
-        model.optimize(model._lazy_contingency_callback)
-    otherwise we fall back to:
-        model.optimize()
-    """
-    cb = getattr(model, "_lazy_contingency_callback", None)
-    has_cb = bool(getattr(model, "_lazy_contingency_attached", False))
-    if cb is not None and has_cb:
-        model.optimize(cb)
-    else:
-        model.optimize()

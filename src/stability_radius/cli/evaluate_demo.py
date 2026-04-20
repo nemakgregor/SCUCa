@@ -253,7 +253,7 @@ def default_agc_participation(G, nodes: List[str]) -> np.ndarray:
     """
     a = np.array([max(G.nodes[n]["generation"], 0.0) for n in nodes], dtype=float)
     if np.sum(a) <= 0:
-        # Fallback to uniform over all nodes if no generators found
+        # Use uniform participation if no generators found
         a = np.ones(len(nodes), dtype=float)
     return a
 

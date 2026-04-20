@@ -1,11 +1,10 @@
 """
-CommitmentHints: lightweight CatBoost/SKLearn classifier to predict unit commitment
+CommitmentHints: CatBoost classifier to predict unit commitment
 u[g,t] and inject "soft" guidance into the solver (Start, VarHintVal, BranchPriority).
 Trains from solved JSON solutions in src/data/output/<case_folder>.
 
 Key features
 - Offline training per case folder (e.g., matpower/case118).
-- Handles missing CatBoost by falling back to scikit-learn GradientBoostingClassifier.
 - Only uses "safe" features available from inputs and simple time descriptors:
   • system load fraction at time t (sum(load)/sum(Pmax))
   • t/T
@@ -20,7 +19,7 @@ Key features
     Note: we recommend NOT fixing; hints + Start are safer and effective.
 
 CLI examples:
-- Train for case118 (CatBoost if available; else SKLearn GBDT):
+- Train for case118:
     python -m src.ml_models.commitment_hints --case matpower/case118 --force
 
 - Inspect trained model path:
@@ -46,23 +45,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-
-# Optional CatBoost
-try:
-    from catboost import CatBoostClassifier
-
-    HAVE_CATBOOST = True
-except Exception:
-    HAVE_CATBOOST = False
-
-# Fallback SKLearn
-try:
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.metrics import roc_auc_score
-
-    HAVE_SKLEARN = True
-except Exception:
-    HAVE_SKLEARN = False
+from catboost import CatBoostClassifier
+from sklearn.metrics import roc_auc_score
 
 from src.data_preparation.params import DataParams
 from src.data_preparation.read_data import read_benchmark
@@ -139,92 +123,21 @@ def _load_system_load_from_input(instance_name: str) -> Optional[List[float]]:
     return sys_load
 
 
-class _SimpleModelWrap:
-    """Abstraction layer to unify CatBoost and SKLearn calls."""
-
-    def __init__(self, model_type: str = "auto"):
-        self.kind = (
-            "cb" if HAVE_CATBOOST and model_type in ("auto", "catboost") else "sk"
-        )
-        if self.kind == "cb":
-            self.model = CatBoostClassifier(
-                iterations=500,
-                learning_rate=0.06,
-                depth=6,
-                loss_function="Logloss",
-                verbose=False,
-                random_state=42,
-            )
-        else:
-            if not HAVE_SKLEARN:
-                raise RuntimeError("Neither CatBoost nor scikit-learn is available.")
-            self.model = GradientBoostingClassifier(
-                random_state=42, n_estimators=300, learning_rate=0.06, max_depth=3
-            )
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
-        if self.kind == "cb":
-            self.model.fit(X, y)
-        else:
-            self.model.fit(X, y)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.kind == "cb":
-            p = self.model.predict_proba(X)
-            return np.array(p)[:, 1]
-        else:
-            p = self.model.predict_proba(X)[:, 1]
-            return np.array(p)
-
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if self.kind == "cb":
-            self.model.save_model(str(path))
-        else:
-            # SKLearn: save as JSON-ish with numpy arrays
-            payload = {
-                "kind": "sk",
-                "model_bytes": None,
-            }
-            # Use joblib if available
-            try:
-                import joblib
-
-                joblib.dump(self.model, path)
-                return
-            except Exception:
-                pass
-            # Fallback: cannot serialize; raise
-            raise RuntimeError("Install joblib to save SKLearn model")
-
-    @staticmethod
-    def load(path: Path):
-        if HAVE_CATBOOST and (path.suffix.lower() in (".cbm", "")):
-            # Try CatBoost
-            try:
-                m = CatBoostClassifier()
-                m.load_model(str(path))
-                w = _SimpleModelWrap("catboost")
-                w.kind = "cb"
-                w.model = m
-                return w
-            except Exception:
-                pass
-        # Try joblib for SKLearn
-        try:
-            import joblib
-
-            mdl = joblib.load(path)
-            w = _SimpleModelWrap(model_type="auto")
-            w.kind = "sk"
-            w.model = mdl
-            return w
-        except Exception as e:
-            raise RuntimeError(f"Cannot load model from {path}: {e}")
+def _new_catboost_model() -> CatBoostClassifier:
+    return CatBoostClassifier(
+        iterations=500,
+        learning_rate=0.06,
+        depth=6,
+        loss_function="Logloss",
+        verbose=False,
+        random_seed=42,
+        thread_count=1,
+        task_type="CPU",
+    )
 
 
 class CommitmentHints:
-    def __init__(self, case_folder: str, model_type: str = "auto"):
+    def __init__(self, case_folder: str):
         self.case = case_folder.strip().strip("/\\").replace("\\", "/")
         self.tag = _case_tag(self.case)
         self.base_dir = (
@@ -235,11 +148,11 @@ class CommitmentHints:
             self.base_dir / "commit_model.cbm"
         ).resolve()  # CatBoost default ext
         self.meta_path = (self.base_dir / "meta.json").resolve()
-        self.model_type = model_type
-        self.model: Optional[_SimpleModelWrap] = None
+        self.model: Optional[CatBoostClassifier] = None
+        self.constant_target: Optional[int] = None
         self.meta: Dict = {}
 
-    def _build_training_df(self, limit: Optional[int] = None) -> Optional[pd.DataFrame]:
+    def _build_training_df(self, limit: Optional[int] = None, restrict_to_names: Optional[set] = None) -> Optional[pd.DataFrame]:
         outs = _list_outputs(self.case)
         if not outs:
             return None
@@ -252,6 +165,8 @@ class CommitmentHints:
             if not out:
                 continue
             name = _instance_name_from_output(op)
+            if restrict_to_names is not None and name not in restrict_to_names:
+                continue
             # Load scenario for static features
             try:
                 inst = read_benchmark(name, quiet=True)
@@ -268,13 +183,45 @@ class CommitmentHints:
                 sum_pmax += float(np.mean([float(x) for x in g.max_power]))
             if sum_pmax <= 0:
                 sum_pmax = 1.0
+            # Compute PTDF-derived features per generator (network-aware)
+            # ISF tells us how much each generator's bus affects each line
+            ptdf_impact = {}  # gen_name -> max |ISF_{l, bus_g}|
+            ptdf_mean = {}    # gen_name -> mean |ISF_{l, bus_g}|
+            bus_degree = {}   # gen_name -> number of lines at bus
+            try:
+                isf = sc.isf.tocsc()
+                buses = sc.buses
+                ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
+                non_ref = sorted([b.index for b in buses if b.index != ref_1b])
+                col_map = {bidx: c for c, bidx in enumerate(non_ref)}
+                # Bus degree (number of incident lines)
+                bdeg = {}
+                for ln in sc.lines:
+                    bdeg[ln.source.index] = bdeg.get(ln.source.index, 0) + 1
+                    bdeg[ln.target.index] = bdeg.get(ln.target.index, 0) + 1
+                for g in sc.thermal_units:
+                    bidx = g.bus.index
+                    bus_degree[g.name] = float(bdeg.get(bidx, 0))
+                    if bidx == ref_1b or bidx not in col_map:
+                        ptdf_impact[g.name] = 0.0
+                        ptdf_mean[g.name] = 0.0
+                    else:
+                        col = isf.getcol(col_map[bidx])
+                        vals = np.abs(col.data)
+                        ptdf_impact[g.name] = float(vals.max()) if len(vals) > 0 else 0.0
+                        ptdf_mean[g.name] = float(vals.mean()) if len(vals) > 0 else 0.0
+            except Exception:
+                for g in sc.thermal_units:
+                    ptdf_impact[g.name] = 0.0
+                    ptdf_mean[g.name] = 0.0
+                    bus_degree[g.name] = 0.0
+
             # Labels from solved output
             gens_sol = out.get("generators", {}) or {}
             for g in sc.thermal_units:
                 gsol = gens_sol.get(g.name, {})
                 u_list = gsol.get("commit", None)
                 if u_list is None:
-                    # cannot train this gen on this instance
                     continue
                 # static features normalized
                 ru = float(getattr(g, "ramp_up", 0.0)) / max(1.0, sum_pmax)
@@ -286,6 +233,10 @@ class CommitmentHints:
                     if (g.initial_status is not None and g.initial_status > 0)
                     else 0.0
                 )
+                # Network-aware features
+                pi = float(ptdf_impact.get(g.name, 0.0))
+                pm = float(ptdf_mean.get(g.name, 0.0))
+                bd = float(bus_degree.get(g.name, 0.0)) / max(1.0, float(len(sc.lines)))
                 for t in range(T):
                     pmin = float(g.min_power[t]) / max(1.0, sum_pmax)
                     pmax = float(g.max_power[t]) / max(1.0, sum_pmax)
@@ -307,6 +258,9 @@ class CommitmentHints:
                             "sd_frac": sd,
                             "must": must,
                             "init_on": init_on,
+                            "ptdf_impact": pi,
+                            "ptdf_mean": pm,
+                            "bus_degree_frac": bd,
                             "y": y,
                         }
                     )
@@ -317,30 +271,55 @@ class CommitmentHints:
         return df
 
     def pretrain(
-        self, force: bool = False, limit: Optional[int] = None
+        self, force: bool = False, limit: Optional[int] = None,
+        restrict_to_names: Optional[set] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        df = self._build_training_df(limit=limit)
+        self.model = None
+        self.constant_target = None
+        df = self._build_training_df(limit=limit, restrict_to_names=restrict_to_names)
         if df is None or df.empty:
             print(f"[commit_hints] No training data found for {self.case}")
             return None
         X = df.drop(columns=["y"]).to_numpy(dtype=float)
         y = df["y"].to_numpy(dtype=int)
-        mdl = _SimpleModelWrap(self.model_type)
+        unique_targets = np.unique(y)
+        if unique_targets.size == 1:
+            constant_target = int(unique_targets[0])
+            if self.model_path.exists():
+                self.model_path.unlink()
+            meta = {
+                "case_folder": self.case,
+                "features": list(df.drop(columns=["y"]).columns),
+                "auc_train": None,
+                "saved_model": None,
+                "constant_target": constant_target,
+            }
+            self.meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            self.meta = meta
+            self.constant_target = constant_target
+            print(
+                f"[commit_hints] Stored constant predictor for {self.case}: "
+                f"target={constant_target}"
+            )
+            return self.meta_path
+        mdl = _new_catboost_model()
         mdl.fit(X, y)
         # Basic AUC on sample (optional)
         try:
-            p = mdl.predict_proba(X)
+            p = np.array(mdl.predict_proba(X), dtype=float)[:, 1]
             auc = roc_auc_score(y, p)
         except Exception:
             auc = None
-        mdl.save(self.model_path)
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        mdl.save_model(str(self.model_path))
         meta = {
             "case_folder": self.case,
             "features": list(df.drop(columns=["y"]).columns),
             "auc_train": None if auc is None else float(auc),
             "saved_model": str(self.model_path),
+            "constant_target": None,
         }
         self.meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         self.model = mdl
@@ -349,19 +328,22 @@ class CommitmentHints:
         return self.model_path
 
     def ensure_trained(self) -> bool:
-        if self.model is not None:
+        if self.model is not None or self.constant_target is not None:
+            return True
+        self.meta = (
+            json.loads(self.meta_path.read_text(encoding="utf-8"))
+            if self.meta_path.exists()
+            else {}
+        )
+        constant_target = self.meta.get("constant_target")
+        if constant_target is not None:
+            self.constant_target = int(constant_target)
             return True
         if self.model_path.exists():
-            try:
-                self.model = _SimpleModelWrap.load(self.model_path)
-                self.meta = (
-                    json.loads(self.meta_path.read_text(encoding="utf-8"))
-                    if self.meta_path.exists()
-                    else {}
-                )
-                return True
-            except Exception:
-                return False
+            model = CatBoostClassifier()
+            model.load_model(str(self.model_path))
+            self.model = model
+            return True
         return False
 
     def _features_for_instance(
@@ -377,6 +359,38 @@ class CommitmentHints:
             sum_pmax += float(np.mean([float(x) for x in g.max_power]))
         if sum_pmax <= 0:
             sum_pmax = 1.0
+
+        # Compute PTDF-derived network-aware features
+        ptdf_impact = {}
+        ptdf_mean_map = {}
+        bus_degree = {}
+        try:
+            isf = sc.isf.tocsc()
+            buses = sc.buses
+            ref_1b = getattr(sc, "ptdf_ref_bus_index", buses[0].index)
+            non_ref = sorted([b.index for b in buses if b.index != ref_1b])
+            col_map = {bidx: c for c, bidx in enumerate(non_ref)}
+            bdeg = {}
+            for ln in sc.lines:
+                bdeg[ln.source.index] = bdeg.get(ln.source.index, 0) + 1
+                bdeg[ln.target.index] = bdeg.get(ln.target.index, 0) + 1
+            for g in sc.thermal_units:
+                bidx = g.bus.index
+                bus_degree[g.name] = float(bdeg.get(bidx, 0))
+                if bidx == ref_1b or bidx not in col_map:
+                    ptdf_impact[g.name] = 0.0
+                    ptdf_mean_map[g.name] = 0.0
+                else:
+                    col = isf.getcol(col_map[bidx])
+                    vals = np.abs(col.data)
+                    ptdf_impact[g.name] = float(vals.max()) if len(vals) > 0 else 0.0
+                    ptdf_mean_map[g.name] = float(vals.mean()) if len(vals) > 0 else 0.0
+        except Exception:
+            for g in sc.thermal_units:
+                ptdf_impact[g.name] = 0.0
+                ptdf_mean_map[g.name] = 0.0
+                bus_degree[g.name] = 0.0
+
         rows = []
         keys = []
         for g in sc.thermal_units:
@@ -387,6 +401,9 @@ class CommitmentHints:
             init_on = (
                 1.0 if (g.initial_status is not None and g.initial_status > 0) else 0.0
             )
+            pi = float(ptdf_impact.get(g.name, 0.0))
+            pm = float(ptdf_mean_map.get(g.name, 0.0))
+            bd = float(bus_degree.get(g.name, 0.0)) / max(1.0, float(len(sc.lines)))
             for t in range(T):
                 load_frac = float(sys_load[min(t, len(sys_load) - 1)]) / max(
                     1.0, sum_pmax
@@ -395,9 +412,10 @@ class CommitmentHints:
                 pmax = float(g.max_power[t]) / max(1.0, sum_pmax)
                 must = 1.0 if bool(g.must_run[t]) else 0.0
                 tt = float(t) / max(1, T - 1)
-                rows.append([load_frac, tt, pmin, pmax, ru, rd, su, sd, must, init_on])
+                rows.append([load_frac, tt, pmin, pmax, ru, rd, su, sd, must, init_on,
+                             pi, pm, bd])
                 keys.append((g.name, t))
-        X = np.array(rows, dtype=float) if rows else np.zeros((0, 10), dtype=float)
+        X = np.array(rows, dtype=float) if rows else np.zeros((0, 13), dtype=float)
         return X, keys
 
     def apply_to_model(
@@ -409,7 +427,7 @@ class CommitmentHints:
         Returns number of variables touched.
         """
         ok = self.ensure_trained()
-        if not ok or self.model is None:
+        if not ok:
             return 0
         commit = getattr(model, "commit", None)
         if commit is None:
@@ -417,7 +435,12 @@ class CommitmentHints:
         X, keys = self._features_for_instance(sc, instance_name)
         if X.shape[0] == 0:
             return 0
-        prob = self.model.predict_proba(X)
+        if self.constant_target is not None:
+            prob = np.full(X.shape[0], float(self.constant_target), dtype=float)
+        elif self.model is not None:
+            prob = np.array(self.model.predict_proba(X), dtype=float)[:, 1]
+        else:
+            return 0
         applied = 0
         # derive time horizon to set priorities: earlier t higher priority
         times = [t for _, t in keys]
