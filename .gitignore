@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+catboost_info/*
 
 # Downloaded datasets
 data/*
@@ -8,6 +9,9 @@ src/data/*
 src/data/intermediate/*
 outputs/*
 results/*
+src/scuc_sr/results/*
+src/scuc_sr/logs/*
+src/scuc_sr/tuning_results/*
 src/stability_radius/outputs/*
 src/paper/
 
@@ -31,3 +35,6 @@ list.md
 res.md
 run.txt
 *.tex
+
+logs/*
+

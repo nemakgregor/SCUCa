@@ -2,7 +2,7 @@
 RedundancyProvider: k-NN constraint-pruning for contingencies.
 
 This version is memory-safe:
-- The persisted index stores ONLY per-instance features (z-scored system load).
+- The persisted index stores ONLY per-instance features (load shape + load level summary).
 - The large per-constraint margins are NOT stored anymore.
 - At inference time (make_filter_for_instance), we compute conservative
   pruning metrics ON THE FLY from the nearest-neighbor's saved JSON solution.
@@ -39,6 +39,11 @@ from scipy.sparse import csc_matrix
 
 from src.data_preparation.params import DataParams
 from src.data_preparation.read_data import read_benchmark
+from src.ml_models.load_features import (
+    FEATURE_VERSION,
+    build_load_feature_vector,
+    load_feature_distance,
+)
 from src.ml_models.warm_start import _hash01  # deterministic split helper
 
 
@@ -62,23 +67,6 @@ def _case_folder_from_instance(instance_name: str) -> str:
 
 def _case_tag(case_folder: str) -> str:
     return _sanitize_name(case_folder)
-
-
-def _zscore(vec: List[float]) -> List[float]:
-    if not vec:
-        return []
-    mean = sum(vec) / len(vec)
-    var = sum((x - mean) ** 2 for x in vec) / max(1, len(vec) - 1)
-    std = math.sqrt(var) if var > 0 else 1.0
-    return [(x - mean) / std for x in vec]
-
-
-def _l2(v1: List[float], v2: List[float]) -> float:
-    if len(v1) != len(v2):
-        L = max(len(v1), len(v2))
-        v1 = v1 + [v1[-1] if v1 else 0.0] * (L - len(v1))
-        v2 = v2 + [v2[-1] if v2 else 0.0] * (L - len(v2))
-    return math.sqrt(sum((a - b) ** 2 for a, b in zip(v1, v2)))
 
 
 def _ensure_list_length(vals: List, T: int, pad_with_last: bool = True, default=0.0):
@@ -136,7 +124,8 @@ class RedundancyProvider:
     k-NN based predictor to skip (prune) contingency constraints safely.
 
     Memory-light index:
-      - features: z-scored system load vector ONLY
+  - features: load descriptor based on the z-scored system load profile plus
+    level-sensitive summary statistics (mean, peak, total energy, std)
       - no per-constraint arrays are stored
 
     At inference time:
@@ -233,6 +222,8 @@ class RedundancyProvider:
             obj = json.loads(path.read_text(encoding="utf-8"))
             if obj.get("case_folder") != case_folder:
                 return False
+            if int(obj.get("feature_version", 1)) != FEATURE_VERSION:
+                return False
             items = obj.get("items", [])
             idx: Dict[str, dict] = {}
             for it in items:
@@ -276,6 +267,7 @@ class RedundancyProvider:
         payload = {
             "case_folder": case_folder,
             "built_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "feature_version": int(FEATURE_VERSION),
             "coverage": float(self._coverage),
             "inputs": list(self._inputs_list),
             "outputs": list(self._outputs_list),
@@ -296,7 +288,7 @@ class RedundancyProvider:
             sys_load = out_json.get("system", {}).get("load", None)
             if not sys_load:
                 return None
-            feats = _zscore([float(x) for x in sys_load])
+            feats = build_load_feature_vector(sys_load)
             return feats
         except Exception:
             return None
@@ -349,7 +341,7 @@ class RedundancyProvider:
                 sys_load = _load_input_system_load(in_path)
                 if not sys_load:
                     continue
-                feats = _zscore([float(x) for x in sys_load])
+                feats = build_load_feature_vector(sys_load)
             idx[instance_name] = {
                 "features": feats,
             }
@@ -413,7 +405,7 @@ class RedundancyProvider:
                 continue
             if exclude_names is not None and name in exclude_names:
                 continue
-            d = _l2(target_feats, item.get("features", []))
+            d = load_feature_distance(target_feats, item.get("features", []))
             if d < best_dist:
                 best_dist = d
                 best_item = item
@@ -598,7 +590,7 @@ class RedundancyProvider:
         if not target_load:
             return None
         T = scenario.time
-        target_feats = _zscore(
+        target_feats = build_load_feature_vector(
             _ensure_list_length([float(x) for x in target_load], T, True, 0.0)
         )
 

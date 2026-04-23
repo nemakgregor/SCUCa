@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 
 from src.data_preparation.params import DataParams
+from src.ml_models.load_features import (
+    FEATURE_VERSION,
+    build_load_feature_vector,
+    load_feature_distance,
+)
 
 
 def _sanitize_name(s: str) -> str:
@@ -72,23 +77,6 @@ def _load_output_solution(output_path: Path) -> Optional[dict]:
         return None
 
 
-def _zscore(vec: List[float]) -> List[float]:
-    if not vec:
-        return []
-    mean = sum(vec) / len(vec)
-    var = sum((x - mean) ** 2 for x in vec) / max(1, len(vec) - 1)
-    std = math.sqrt(var) if var > 0 else 1.0
-    return [(x - mean) / std for x in vec]
-
-
-def _l2(v1: List[float], v2: List[float]) -> float:
-    if len(v1) != len(v2):
-        L = max(len(v1), len(v2))
-        v1 = v1 + [v1[-1] if v1 else 0.0] * (L - len(v1))
-        v2 = v2 + [v2[-1] if v2 else 0.0] * (L - len(v2))
-    return math.sqrt(sum((a - b) ** 2 for a, b in zip(v1, v2)))
-
-
 def _ensure_list_length(vals: List, T: int, pad_with_last: bool = True, default=0):
     if vals is None:
         return [default] * T
@@ -124,6 +112,10 @@ class WarmStartProvider:
         'warm_fixed_<instance>.json' using src.ml_models.fix_warm_start (no Gurobi).
       - apply_warm_start_to_model(...) now prefers a 'warm_fixed_<instance>.json' file
         if present, falling back to 'warm_<instance>.json'.
+      - nearest-neighbor matching now uses a mixed load descriptor: z-scored profile
+        plus level-sensitive summary statistics (mean, peak, total energy, std). This
+        avoids the degenerate case where two load profiles differing only by a constant
+        offset appear identical under pure z-score matching.
     """
 
     def __init__(
@@ -202,6 +194,8 @@ class WarmStartProvider:
             obj = json.loads(path.read_text(encoding="utf-8"))
             if obj.get("case_folder") != case_folder:
                 return False
+            if int(obj.get("feature_version", 1)) != FEATURE_VERSION:
+                return False
 
             items = obj.get("items", [])
             idx: Dict[str, dict] = {}
@@ -263,6 +257,7 @@ class WarmStartProvider:
         payload = {
             "case_folder": case_folder,
             "built_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "feature_version": int(FEATURE_VERSION),
             "coverage": float(self._coverage),
             "threshold": float(self.coverage_threshold),
             "ratios": {
@@ -336,7 +331,7 @@ class WarmStartProvider:
             commits = {}
             for gname, gsol in gens.items():
                 commits[gname] = list(gsol.get("commit", []))
-            feats = _zscore([float(x) for x in sys_load])
+            feats = build_load_feature_vector(sys_load)
             index[instance_name] = {"features": feats, "commit": commits}
 
         self._trained_index = index
@@ -387,7 +382,7 @@ class WarmStartProvider:
                 continue
             if exclude_names is not None and name in exclude_names:
                 continue
-            d = _l2(target_feats, item["features"])
+            d = load_feature_distance(target_feats, item["features"])
             if d < best_dist:
                 best_dist = d
                 best_item = item
@@ -414,7 +409,7 @@ class WarmStartProvider:
         target_load = _load_input_system_load(input_path)
         if not target_load:
             return None
-        target_feats = _zscore([float(x) for x in target_load])
+        target_feats = build_load_feature_vector(target_load)
 
         restrict = self._splits["train"] if use_train_index_only else None
         exclude = {instance_name} if exclude_self else None
