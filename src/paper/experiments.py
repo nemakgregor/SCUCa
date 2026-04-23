@@ -36,6 +36,10 @@ from src.paper.experiment_spec import (
     CASES_MEDLARGE,
     CASES_SMALL,
     DEFAULT_NO_REL_HEUR_TIME_RATIO,
+    MEDLARGE_COMBO_CANDIDATE_MODE_IDS,
+    MEDLARGE_COMBO_FALLBACK_MODE_IDS,
+    MEDLARGE_COMBO_TOP_K,
+    MEDLARGE_CORE_MODE_IDS,
     DROP_MEDIAN_RUNTIME_FRACTION,
     DROP_SUCCESS_RATE_MIN,
     EXPERIMENT_SEED,
@@ -43,6 +47,9 @@ from src.paper.experiment_spec import (
     MODE_CATALOG_MEDLARGE_FULL,
     MODE_CATALOG_SMALL,
     PILOT_N,
+    SHORTLIST_MIN_PASS_RATE,
+    SMALL_COMBO_MODE_IDS,
+    SMALL_SINGLE_MODE_IDS,
     TEST_DATES_6,
     TEST_TL_CAP_SEC_BY_CASE,
     TEST_TL_INIT_SEC_BY_CASE,
@@ -124,6 +131,141 @@ def _medlarge_catalog(kind: str) -> List[ModeSpec]:
     return list(MODE_CATALOG_MEDLARGE_FULL if str(kind).strip().lower() == "full" else MODE_CATALOG_MEDLARGE_START)
 
 
+def _mode_lookup(catalog: Sequence[ModeSpec]) -> Dict[str, ModeSpec]:
+    return {mode.mode_id: mode for mode in catalog}
+
+
+def _ordered_modes_from_ids(catalog: Sequence[ModeSpec], mode_ids: Sequence[str]) -> List[ModeSpec]:
+    lookup = _mode_lookup(catalog)
+    ordered: List[ModeSpec] = []
+    for mode_id in mode_ids:
+        if mode_id in lookup:
+            ordered.append(lookup[mode_id])
+    return ordered
+
+
+def _latest_test_rows(paths: RunPaths, case_filter: Optional[Set[str]] = None) -> List[Dict]:
+    if not paths.csv_path.exists():
+        return []
+    latest: Dict[Tuple[str, str, str], Dict] = {}
+    with paths.csv_path.open("r", encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            if str(row.get("stage") or "").strip().upper() != "TEST":
+                continue
+            case_folder = str(row.get("case_folder") or "").strip()
+            if case_filter is not None and case_folder not in case_filter:
+                continue
+            key = (case_folder, str(row.get("instance_name") or "").strip(), str(row.get("mode_id") or "").strip())
+            latest[key] = row
+    return list(latest.values())
+
+
+def _safe_float(value: object) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _select_combo_shortlist(paths: RunPaths, reference_cases: Sequence[str], candidate_mode_ids: Sequence[str]) -> List[str]:
+    if not reference_cases:
+        return [mode_id for mode_id in MEDLARGE_COMBO_FALLBACK_MODE_IDS if mode_id in set(candidate_mode_ids)]
+    ref_rows = _latest_test_rows(paths, case_filter=set(reference_cases))
+    if not ref_rows:
+        return [mode_id for mode_id in MEDLARGE_COMBO_FALLBACK_MODE_IDS if mode_id in set(candidate_mode_ids)]
+    rows_by_instance: Dict[Tuple[str, str], Dict[str, Dict]] = {}
+    for row in ref_rows:
+        inst_key = (str(row.get("case_folder") or "").strip(), str(row.get("instance_name") or "").strip())
+        rows_by_instance.setdefault(inst_key, {})[str(row.get("mode_id") or "").strip()] = row
+    scored: List[Tuple[float, float, int, float, str]] = []
+    for mode_id in candidate_mode_ids:
+        paired_speedups: List[float] = []
+        solved_count = 0
+        solved_runtimes: List[float] = []
+        total_instances = 0
+        for mode_rows in rows_by_instance.values():
+            raw_row = mode_rows.get("RAW")
+            mode_row = mode_rows.get(mode_id)
+            if raw_row is None:
+                continue
+            total_instances += 1
+            if mode_row is None or int(mode_row.get("pass") or 0) != 1:
+                continue
+            solved_count += 1
+            mode_runtime = _safe_float(mode_row.get("runtime_sec"))
+            if mode_runtime is not None:
+                solved_runtimes.append(mode_runtime)
+            if int(raw_row.get("pass") or 0) != 1:
+                continue
+            raw_runtime = _safe_float(raw_row.get("runtime_sec"))
+            if raw_runtime is None or mode_runtime is None or raw_runtime <= 0.0 or mode_runtime <= 0.0:
+                continue
+            paired_speedups.append(raw_runtime / mode_runtime)
+        if total_instances <= 0:
+            continue
+        pass_rate = float(solved_count) / float(total_instances)
+        if pass_rate < float(SHORTLIST_MIN_PASS_RATE):
+            continue
+        median_speedup = float(statistics.median(paired_speedups)) if paired_speedups else 0.0
+        median_runtime = float(statistics.median(solved_runtimes)) if solved_runtimes else float("inf")
+        scored.append((pass_rate, median_speedup, len(paired_speedups), -median_runtime, mode_id))
+    scored.sort(reverse=True)
+    selected = [mode_id for _, _, _, _, mode_id in scored[:MEDLARGE_COMBO_TOP_K]]
+    if selected:
+        return selected
+    return [mode_id for mode_id in MEDLARGE_COMBO_FALLBACK_MODE_IDS if mode_id in set(candidate_mode_ids)]
+
+
+def _reference_cases_for_shortlist(case_folder: str) -> List[str]:
+    ordered_cases = list(CASES_ALL)
+    if case_folder not in ordered_cases:
+        return []
+    idx = ordered_cases.index(case_folder)
+    return ordered_cases[:idx]
+
+
+def _staged_small_modes() -> List[ModeSpec]:
+    single_modes = _ordered_modes_from_ids(MODE_CATALOG_SMALL, SMALL_SINGLE_MODE_IDS)
+    combo_modes = _ordered_modes_from_ids(MODE_CATALOG_SMALL, SMALL_COMBO_MODE_IDS)
+    return single_modes + combo_modes
+
+
+def _staged_medlarge_modes(case_folder: str, paths: RunPaths, medlarge_kind: str) -> List[ModeSpec]:
+    catalog = _medlarge_catalog(medlarge_kind)
+    reference_cases = _reference_cases_for_shortlist(case_folder)
+    core_modes = _ordered_modes_from_ids(catalog, MEDLARGE_CORE_MODE_IDS)
+    combo_modes = _ordered_modes_from_ids(
+        catalog,
+        _select_combo_shortlist(
+            paths,
+            reference_cases=reference_cases,
+            candidate_mode_ids=MEDLARGE_COMBO_CANDIDATE_MODE_IDS,
+        ),
+    )
+    seen: Set[str] = set()
+    ordered: List[ModeSpec] = []
+    for mode in core_modes + combo_modes:
+        if mode.mode_id in seen:
+            continue
+        seen.add(mode.mode_id)
+        ordered.append(mode)
+    logger.info(
+        "Staged medlarge mode selection: case=%s ref_cases=%s selected=%s",
+        case_folder,
+        reference_cases,
+        [mode.mode_id for mode in ordered],
+    )
+    return ordered
+
+
+def _staged_case_modes(case_folder: str, paths: RunPaths, medlarge_kind: str) -> List[ModeSpec]:
+    if case_folder in CASES_SMALL:
+        return _staged_small_modes()
+    return _staged_medlarge_modes(case_folder, paths, medlarge_kind)
+
+
 def _configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("gurobipy").setLevel(logging.WARNING)
@@ -200,6 +342,7 @@ def _default_state(run_id: str, medlarge_mode_ids: Optional[Sequence[str]] = Non
     return {
         "run_id": run_id,
         "seed": EXPERIMENT_SEED,
+        "comparison_plan": "staged",
         "completed_keys": [],
         "artifacts_built_cases": [],
         "case_state": {},
@@ -839,22 +982,67 @@ def _mode_median_runtime(rows: Sequence[Dict]) -> float:
     return float("inf") if not runtimes else float(statistics.median(runtimes))
 
 
-def _run_small_test_stage(*, run_id: str, case_folder: str, test_instances: Sequence[str], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict) -> None:
-    logger.info("TEST start (small): %s", case_folder)
+def _run_test_modes(*, run_id: str, case_folder: str, test_instances: Sequence[str], modes: Sequence[ModeSpec], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict, time_limit_sec: int) -> List[Dict]:
     completed = set(state.get("completed_keys", []))
-    for mode in MODE_CATALOG_SMALL:
-        mode_tl = replace(mode, time_limit_sec=int(TEST_TL_INIT_SEC_BY_CASE[case_folder]))
+    case_rows: List[Dict] = []
+    result_lookup = _load_result_lookup(paths.csv_path)
+    for mode in modes:
+        mode_tl = replace(mode, time_limit_sec=int(time_limit_sec))
         for instance_name in test_instances:
             key = _result_key("TEST", mode_tl.mode_id, instance_name, mode_tl.time_limit_sec)
             if key in completed:
+                if key in result_lookup:
+                    case_rows.append(result_lookup[key])
                 continue
             row = _run_single_solve(run_id=run_id, stage="TEST", instance_name=instance_name, mode=mode_tl, case_artifacts=case_artifacts, paths=paths)
+            case_rows.append(row)
             _record_row(paths, state, row)
             completed.add(key)
+            result_lookup[key] = row
+    return case_rows
 
 
-def _run_large_test_stage(*, run_id: str, case_folder: str, test_instances: Sequence[str], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict, global_alive_mode_ids: Sequence[str], no_medlarge_drop: bool = False) -> Tuple[List[Dict], List[str], int]:
-    logger.info("TEST start (medlarge): %s", case_folder)
+def _run_small_test_stage(*, run_id: str, case_folder: str, test_instances: Sequence[str], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict, comparison_plan: str) -> None:
+    logger.info("TEST start (small): %s", case_folder)
+    if str(comparison_plan).strip().lower() == "staged":
+        modes = _staged_case_modes(case_folder, paths, medlarge_kind="full")
+    else:
+        modes = list(MODE_CATALOG_SMALL)
+    _run_test_modes(
+        run_id=run_id,
+        case_folder=case_folder,
+        test_instances=test_instances,
+        modes=modes,
+        case_artifacts=case_artifacts,
+        paths=paths,
+        state=state,
+        time_limit_sec=int(TEST_TL_INIT_SEC_BY_CASE[case_folder]),
+    )
+
+
+def _run_large_test_stage_staged(*, run_id: str, case_folder: str, test_instances: Sequence[str], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict) -> Tuple[List[Dict], List[str], int]:
+    logger.info("TEST start (medlarge staged): %s", case_folder)
+    selected_modes = _staged_case_modes(case_folder, paths, medlarge_kind=str(state.get("medlarge_modes_kind", "full")))
+    current_tl = int(TEST_TL_INIT_SEC_BY_CASE[case_folder])
+    case_rows = _run_test_modes(
+        run_id=run_id,
+        case_folder=case_folder,
+        test_instances=test_instances,
+        modes=selected_modes,
+        case_artifacts=case_artifacts,
+        paths=paths,
+        state=state,
+        time_limit_sec=current_tl,
+    )
+    case_state = state.setdefault("case_state", {}).setdefault(case_folder, {})
+    case_state["test_time_limit_sec"] = current_tl
+    case_state["selected_mode_ids"] = [mode.mode_id for mode in selected_modes]
+    _save_state(paths, state)
+    return case_rows, [mode.mode_id for mode in selected_modes], current_tl
+
+
+def _run_large_test_stage_legacy(*, run_id: str, case_folder: str, test_instances: Sequence[str], case_artifacts: CaseArtifacts, paths: RunPaths, state: Dict, global_alive_mode_ids: Sequence[str], no_medlarge_drop: bool = False) -> Tuple[List[Dict], List[str], int]:
+    logger.info("TEST start (medlarge legacy): %s", case_folder)
     mode_lookup = {mode.mode_id: mode for mode in _medlarge_catalog(str(state.get("medlarge_modes_kind", "start")))}
     alive_modes = [mode_lookup[mode_id] for mode_id in global_alive_mode_ids if mode_id in mode_lookup]
     current_tl = int(state.get("case_state", {}).get(case_folder, {}).get("test_time_limit_sec", TEST_TL_INIT_SEC_BY_CASE[case_folder]))
@@ -936,7 +1124,7 @@ def _select_cases(profile: str) -> List[str]:
     return list(CASES_ALL)
 
 
-def _run_case(*, run_id: str, case_folder: str, paths: RunPaths, state: Dict, medlarge_alive_mode_ids: Sequence[str], no_medlarge_drop: bool = False) -> List[str]:
+def _run_case(*, run_id: str, case_folder: str, paths: RunPaths, state: Dict, medlarge_alive_mode_ids: Sequence[str], comparison_plan: str, no_medlarge_drop: bool = False) -> List[str]:
     train_instances, test_instances = _case_instances(case_folder)
     if bool(state.get("case_state", {}).get(case_folder, {}).get("skipped", False)):
         logger.warning("CASE skipped (state): %s", case_folder)
@@ -956,9 +1144,29 @@ def _run_case(*, run_id: str, case_folder: str, paths: RunPaths, state: Dict, me
     if artifacts is None:
         return list(medlarge_alive_mode_ids)
     if case_folder in CASES_SMALL:
-        _run_small_test_stage(run_id=run_id, case_folder=case_folder, test_instances=test_instances, case_artifacts=artifacts, paths=paths, state=state)
+        _run_small_test_stage(
+            run_id=run_id,
+            case_folder=case_folder,
+            test_instances=test_instances,
+            case_artifacts=artifacts,
+            paths=paths,
+            state=state,
+            comparison_plan=comparison_plan,
+        )
         return list(medlarge_alive_mode_ids)
-    case_rows, alive_mode_ids, current_tl = _run_large_test_stage(
+    if str(comparison_plan).strip().lower() == "staged":
+        case_rows, alive_mode_ids, _ = _run_large_test_stage_staged(
+            run_id=run_id,
+            case_folder=case_folder,
+            test_instances=test_instances,
+            case_artifacts=artifacts,
+            paths=paths,
+            state=state,
+        )
+        state["alive_mode_ids"] = list(alive_mode_ids)
+        _save_state(paths, state)
+        return list(alive_mode_ids)
+    case_rows, alive_mode_ids, current_tl = _run_large_test_stage_legacy(
         run_id=run_id,
         case_folder=case_folder,
         test_instances=test_instances,
@@ -981,8 +1189,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--medlarge-modes",
         choices=("start", "full"),
-        default="start",
-        help="Mode catalog for medium/large cases: compact lazy starter set or expanded full set.",
+        default="full",
+        help="Mode catalog for medium/large cases. `full` is the recommended setting for fair staged comparison.",
+    )
+    parser.add_argument(
+        "--comparison-plan",
+        choices=("staged", "legacy-drop"),
+        default="staged",
+        help="`staged`: test core modes first and shortlist combo modes for larger cases using smaller solved cases. `legacy-drop`: keep the old pilot/drop logic.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume an existing run-id.")
     parser.add_argument(
@@ -998,7 +1212,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-medlarge-drop",
         action="store_true",
-        help="Do not drop medium/large modes after pilot filtering; run all currently alive modes on all test dates.",
+        help="Legacy-only option: do not drop medium/large modes after pilot filtering.",
     )
     return parser.parse_args()
 
@@ -1019,6 +1233,9 @@ def main() -> None:
             if mode_id not in existing_alive:
                 existing_alive.append(mode_id)
         state["alive_mode_ids"] = existing_alive or medlarge_mode_ids
+    state_plan = str(state.get("comparison_plan", "") or "").strip().lower()
+    if not args.resume or state_plan != args.comparison_plan:
+        state["comparison_plan"] = args.comparison_plan
     alive_mode_ids = list(state.get("alive_mode_ids", medlarge_mode_ids))
     cases = _select_cases(args.profile)
     if args.only_case:
@@ -1037,6 +1254,7 @@ def main() -> None:
             paths=paths,
             state=state,
             medlarge_alive_mode_ids=alive_mode_ids,
+            comparison_plan=args.comparison_plan,
             no_medlarge_drop=bool(args.no_medlarge_drop),
         )
         logger.info("CASE complete: %s", case_folder)

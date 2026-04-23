@@ -744,3 +744,56 @@ MODE_CATALOG_MEDLARGE_FULL = [
         exact_method=False,
     ),
 ]
+
+
+SMALL_SINGLE_MODE_IDS = (
+    "RAW",
+    "RAW_GNN",
+    "RAW_COMMIT_HINTS",
+    "WARM",
+    "WARM_BRANCH_HINTS",
+    "WARM_COMMIT_HINTS",
+    "WARM_GRU",
+    "LAZY_ALL",
+    "LAZY_TOPK128",
+    "LAZY_BANDIT",
+    "ACTIVESET",
+    "SHRINK_LAZY",
+    "STREDUCE",
+    "STREDUCE_GRU",
+)
+
+SMALL_COMBO_MODE_IDS = tuple(
+    mode.mode_id for mode in MODE_CATALOG_SMALL if mode.mode_id not in set(SMALL_SINGLE_MODE_IDS)
+)
+
+MEDLARGE_CORE_MODE_IDS = (
+    "RAW",
+    "RAW_GNN",
+    "RAW_COMMIT_HINTS",
+    "WARM",
+    "WARM_BRANCH_HINTS",
+    "WARM_COMMIT_HINTS",
+    "WARM_GRU",
+    "LAZY_ALL",
+    "LAZY_TOPK128",
+    "LAZY_BANDIT",
+    "ACTIVESET_LAZY",
+    "STREDUCE_LAZY",
+    "SHRINK_LAZY",
+)
+
+MEDLARGE_COMBO_CANDIDATE_MODE_IDS = tuple(
+    mode.mode_id for mode in MODE_CATALOG_MEDLARGE_FULL if mode.mode_id not in set(MEDLARGE_CORE_MODE_IDS)
+)
+
+MEDLARGE_COMBO_FALLBACK_MODE_IDS = (
+    "WARM_LAZY",
+    "WARM_PRUNE_T030",
+    "WARM_LPSCREEN_T020",
+    "WARM_PRUNE_LAZY_T030",
+    "WARM_SR_LAZY",
+)
+
+MEDLARGE_COMBO_TOP_K = 5
+SHORTLIST_MIN_PASS_RATE = 0.50
