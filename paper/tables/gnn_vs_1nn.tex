@@ -1,0 +1,16 @@
+\begin{table}[t]\centering
+\caption{Ablation of the GraphSAGE screener against the 1-NN baseline. Values are means across the six benchmark cases. ``Kept ratio'' is the fraction of post-contingency constraints retained after screening.}
+\label{tab:gnn_ablation}
+\small
+\begin{tabular}{lcccc}
+\hline
+\textbf{Threshold} & \textbf{Speedup (1-NN)} & \textbf{Speedup (GNN)} & \textbf{Ratio} & \textbf{Kept ratio (1-NN / GNN)} \\
+\hline
+PRUNE-0.10 & 9.64x & 9.58x & 0.987 & 0.05\% / 0.05\% \\
+PRUNE-0.20 & 8.68x & 8.63x & 1.004 & 0.12\% / 0.12\% \\
+PRUNE-0.30 & 6.96x & 6.90x & 0.997 & 0.47\% / 0.47\% \\
+PRUNE-0.50 & 3.56x & 3.61x & 1.018 & 3.00\% / 2.98\% \\
+PRUNE-0.80 & 2.39x & 2.42x & 1.035 & 18.12\% / 18.04\% \\
+\hline
+\end{tabular}
+\end{table}

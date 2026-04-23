@@ -34,7 +34,6 @@ openapi/
 list.md
 res.md
 run.txt
-*.tex
 
 logs/*
 
