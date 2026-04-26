@@ -66,8 +66,9 @@ def _case_tag(case_folder: str) -> str:
     return _sanitize_name(case_folder)
 
 
-def _instance_name_from_output(p: Path) -> str:
-    rel = p.resolve().relative_to(DataParams._OUTPUT.resolve()).as_posix()
+def _instance_name_from_output(p: Path, output_root: Optional[Path] = None) -> str:
+    root = Path(output_root).resolve() if output_root is not None else DataParams._OUTPUT.resolve()
+    rel = p.resolve().relative_to(root).as_posix()
     if rel.endswith(".json"):
         rel = rel[: -len(".json")]
     return rel
@@ -83,8 +84,9 @@ def _read_json_auto(path: Path) -> Optional[dict]:
         return None
 
 
-def _list_outputs(case_folder: str) -> List[Path]:
-    d = (DataParams._OUTPUT / case_folder).resolve()
+def _list_outputs(case_folder: str, output_root: Optional[Path] = None) -> List[Path]:
+    root = Path(output_root).resolve() if output_root is not None else DataParams._OUTPUT.resolve()
+    d = (root / case_folder).resolve()
     if not d.exists():
         return []
     return sorted(d.glob("*.json"))
@@ -195,22 +197,35 @@ class _LineSAGE(nn.Module):
 
 
 class GNNLineScreener:
-    def __init__(self, case_folder: str):
+    def __init__(
+        self,
+        case_folder: str,
+        output_root: Optional[Path] = None,
+        artifact_root: Optional[Path] = None,
+    ):
         self.case = case_folder.strip().strip("/\\").replace("\\", "/")
         self.tag = _case_tag(self.case)
-        self.base_dir = (
-            DataParams._INTERMEDIATE / "gnn_screening" / self.tag
-        ).resolve()
+        self.output_root = (
+            Path(output_root).resolve() if output_root is not None else None
+        )
+        base_root = (
+            Path(artifact_root).resolve()
+            if artifact_root is not None
+            else (DataParams._INTERMEDIATE / "gnn_screening").resolve()
+        )
+        self.base_dir = (base_root / self.tag).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.model_path = (self.base_dir / "line_sage.pt").resolve()
         self.meta_path = (self.base_dir / "meta.json").resolve()
         self.model: Optional[_LineSAGE] = None
 
-    def _build_dataset(self) -> Optional[List[GeoData]]:
+    def _build_dataset(self, max_items: Optional[int] = None) -> Optional[List[GeoData]]:
         if not HAVE_PYG:
             print("[gnn_screen] torch-geometric not available; cannot train.")
             return None
-        outs = _list_outputs(self.case)
+        outs = _list_outputs(self.case, output_root=self.output_root)
+        if max_items is not None and max_items > 0:
+            outs = outs[:max_items]
         if not outs:
             return None
         data_list = []
@@ -218,7 +233,7 @@ class GNNLineScreener:
             out = _read_json_auto(op)
             if not out:
                 continue
-            name = _instance_name_from_output(op)
+            name = _instance_name_from_output(op, output_root=self.output_root)
             try:
                 inst = read_benchmark(name, quiet=True)
                 sc = inst.deterministic
@@ -253,10 +268,11 @@ class GNNLineScreener:
         lr: float = 1e-3,
         batch_size: int = 1,
         force: bool = False,
+        max_items: Optional[int] = None,
     ) -> Optional[Path]:
         if self.model_path.exists() and not force:
             return self.model_path
-        data_list = self._build_dataset()
+        data_list = self._build_dataset(max_items=max_items)
         if not data_list:
             print("[gnn_screen] No data to train.")
             return None

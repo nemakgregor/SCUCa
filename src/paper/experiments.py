@@ -30,6 +30,7 @@ from src.optimization_model.helpers.branching_hints import (
 from src.optimization_model.helpers.lazy_contingency_cb import (
     attach_lazy_contingency_callback,
     LazyContingencyConfig,
+    finalize_lazy_contingency_closure,
 )
 from src.optimization_model.helpers.save_json_solution import (
     save_solution_as_json,
@@ -181,6 +182,9 @@ class RunConfig:
     lazy_lodf_tol: float = 1e-4
     lazy_isf_tol: float = 1e-8
     lazy_viol_tol: float = 1e-6
+    lazy_finalize_exact: bool = True
+    lazy_finalize_rounds: int = 3
+    lazy_finalize_time_limit: float = 30.0
 
     # ML feature toggles for this specific run
     use_commit_hints: bool = False
@@ -551,8 +555,21 @@ def solve_one(
         pass
 
     # Optimize with memory sampler
+    solve_runtime = 0.0
+    _lazy_cb = getattr(model, "_lazy_contingency_callback", None)
     with PeakMemSampler(interval_sec=0.2) as mems:
-        model.optimize()
+        model.optimize(_lazy_cb)
+        solve_runtime += float(getattr(model, "Runtime", 0.0) or 0.0)
+        if use_lazy and bool(mode_cfg.lazy_finalize_exact):
+            closure_stats = finalize_lazy_contingency_closure(
+                model,
+                sc,
+                getattr(model, "_lazy_contingency_cfg", None),
+                max_rounds=int(mode_cfg.lazy_finalize_rounds),
+                per_round_time_limit=float(mode_cfg.lazy_finalize_time_limit),
+                verbose=True,
+            )
+            solve_runtime += float(closure_stats.get("extra_runtime_sec", 0.0) or 0.0)
         peak_mem_gb = mems.peak_gb
 
     # Save JSON solution
@@ -567,7 +584,13 @@ def solve_one(
     obj_inconsistency = None
     violations_str = None
     try:
-        feasible_ok, checks, _ = verify_solution(sc, model)
+        feasible_ok, checks, verify_report = verify_solution(sc, model)
+        logger.info(
+            "Verification [%s | %s]:\n%s",
+            instance_name,
+            mode_label,
+            verify_report,
+        )
         vals = []
         for c in checks:
             try:
@@ -592,7 +615,8 @@ def solve_one(
             except Exception:
                 pass
         violations_str = "OK" if not bad_ids else " ".join(sorted(set(bad_ids)))
-    except Exception:
+    except Exception as _verify_exc:
+        logger.warning("Verification failed for %s | %s: %s", instance_name, mode_label, _verify_exc)
         feasible_ok = None
         max_constraint_residual = None
         obj_inconsistency = None
@@ -600,7 +624,7 @@ def solve_one(
 
     # Metrics
     status_code = int(getattr(model, "Status", -1))
-    runtime = float(getattr(model, "Runtime", 0.0) or 0.0)
+    runtime = float(solve_runtime)
     try:
         mip_gap = float(model.MIPGap)
     except Exception:
@@ -956,17 +980,42 @@ def main():
     ap.add_argument(
         "--lazy-viol-tol",
         type=float,
-        default=10,
+        default=1e-6,
         help="Lazy: violation tolerance [MW]",
     )
     ap.add_argument(
         "--lazy-lodf-tol",
         type=float,
-        default=10,
+        default=1e-4,
         help="Lazy: |LODF| ignore threshold",
     )
     ap.add_argument(
         "--lazy-isf-tol", type=float, default=1e-8, help="Lazy: |ISF| ignore threshold"
+    )
+    ap.add_argument(
+        "--lazy-finalize-exact",
+        dest="lazy_finalize_exact",
+        action="store_true",
+        default=True,
+        help="After top-K/adaptive lazy search, run a short exact closure pass that adds all remaining contingency violations.",
+    )
+    ap.add_argument(
+        "--no-lazy-finalize-exact",
+        dest="lazy_finalize_exact",
+        action="store_false",
+        help="Disable the post-solve exact closure pass for lazy top-K/adaptive runs.",
+    )
+    ap.add_argument(
+        "--lazy-finalize-rounds",
+        type=int,
+        default=3,
+        help="Maximum number of exact-closure re-optimization rounds for lazy top-K/adaptive runs.",
+    )
+    ap.add_argument(
+        "--lazy-finalize-time",
+        type=float,
+        default=30.0,
+        help="Per-round time limit [s] for the exact closure pass after lazy top-K/adaptive runs.",
     )
     ap.add_argument(
         "--rc-max-items",
@@ -1170,6 +1219,9 @@ def main():
                         lazy_lodf_tol=args.lazy_lodf_tol,
                         lazy_isf_tol=args.lazy_isf_tol,
                         lazy_viol_tol=args.lazy_viol_tol,
+                        lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                        lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                        lazy_finalize_time_limit=float(args.lazy_finalize_time),
                     )
                     _ = solve_one(
                         nm, cfg, wsp=None, rc=None, use_train_db_for_rc=True, args=args
@@ -1215,6 +1267,9 @@ def main():
                             commit_mode=str(args.adv_commit_mode),
                             commit_thr=float(args.adv_commit_thr),
                             commit_on_raw=bool(args.adv_commit_on_raw),
+                            lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                            lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                            lazy_finalize_time_limit=float(args.lazy_finalize_time),
                             save_human_logs=args.save_human_logs,
                         )
                     )
@@ -1230,6 +1285,9 @@ def main():
                             commit_mode=str(args.adv_commit_mode),
                             commit_thr=float(args.adv_commit_thr),
                             use_gru_warm=bool(args.adv_gru_warm),
+                            lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                            lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                            lazy_finalize_time_limit=float(args.lazy_finalize_time),
                             save_human_logs=args.save_human_logs,
                         )
                     )
@@ -1245,6 +1303,9 @@ def main():
                             commit_mode=str(args.adv_commit_mode),
                             commit_thr=float(args.adv_commit_thr),
                             use_gru_warm=bool(args.adv_gru_warm),
+                            lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                            lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                            lazy_finalize_time_limit=float(args.lazy_finalize_time),
                             save_human_logs=args.save_human_logs,
                         )
                     )
@@ -1261,6 +1322,9 @@ def main():
                             use_adaptive_topk=bool(args.adv_adaptive_topk),
                             topk_candidates=args.adv_topk_candidates,
                             topk_epsilon=float(args.adv_topk_epsilon),
+                            lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                            lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                            lazy_finalize_time_limit=float(args.lazy_finalize_time),
                             use_commit_hints=bool(args.adv_commit_hints),
                             commit_mode=str(args.adv_commit_mode),
                             commit_thr=float(args.adv_commit_thr),
@@ -1282,6 +1346,9 @@ def main():
                                 commit_mode=str(args.adv_commit_mode),
                                 commit_thr=float(args.adv_commit_thr),
                                 use_gru_warm=bool(args.adv_gru_warm),
+                                lazy_finalize_exact=bool(args.lazy_finalize_exact),
+                                lazy_finalize_rounds=int(args.lazy_finalize_rounds),
+                                lazy_finalize_time_limit=float(args.lazy_finalize_time),
                                 save_human_logs=args.save_human_logs,
                             )
                         )

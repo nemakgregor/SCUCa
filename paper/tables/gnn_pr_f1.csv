@@ -1,0 +1,7 @@
+case_folder,n_test_instances,n_labels,positive_rate,precision,recall,f1,tp,fp,fn,tn,model_source,feature_dim
+matpower/case118,6,1116,0.0,,,,0,0,0,1116,retrained,7
+matpower/case14,6,120,0.0,,,,0,0,0,120,retrained,7
+matpower/case30,6,246,0.0,,,,0,0,0,246,retrained,7
+matpower/case300,6,2466,0.0515,0.8333,0.5118,0.6341,65,13,62,2326,retrained,7
+matpower/case57,4,320,0.0,,,,0,0,0,320,retrained,7
+matpower/case89pegase,6,1260,0.0024,,0.0,,0,0,3,1257,retrained,7

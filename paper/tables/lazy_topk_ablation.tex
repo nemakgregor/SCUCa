@@ -1,0 +1,21 @@
+\begin{table}[t]\centering
+\caption{Fixed-$K$ ablation for lazy post-contingency cut generation. The fixed-$K$ rows use $K\in\{64,128,256\}$; feasibility is the share of runs whose post-solve violation audit returned OK.}
+\label{tab:lazy_topk}
+\small
+\begin{tabular}{llrrrr}
+\hline
+\textbf{Case} & \textbf{Variant} & \textbf{n} & \textbf{Median [s]} & \textbf{Median speed-up} & \textbf{Feasible} \\
+\hline
+case118 & \texttt{LAZY} & 49 & 4.38 & 9.02x & 100\% \\
+case118 & \texttt{BANDIT} & 49 & 4.40 & 8.99x & 100\% \\
+case118 & \texttt{K64} & 49 & 3.54 & 11.42x & 100\% \\
+case118 & \texttt{K128} & 49 & 2.20 & 18.36x & 96\% \\
+case118 & \texttt{K256} & 49 & 2.16 & 18.71x & 100\% \\
+case300 & \texttt{LAZY} & 59 & 13.80 & 14.44x & 100\% \\
+case300 & \texttt{BANDIT} & 59 & 13.82 & 14.55x & 100\% \\
+case300 & \texttt{K64} & 59 & 26.81 & 7.43x & 66\% \\
+case300 & \texttt{K128} & 59 & 26.66 & 7.47x & 66\% \\
+case300 & \texttt{K256} & 59 & 27.42 & 7.27x & 66\% \\
+\hline
+\end{tabular}
+\end{table}

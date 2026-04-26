@@ -22,7 +22,7 @@
 \maketitle
 
 \begin{abstract}
-The Security-Constrained Unit Commitment (SCUC) problem determines day-ahead generator schedules for power systems while maintaining grid stability. It requires finding minimum-cost generator commitments that satisfy power flow limits and N-1 security criteria. The challenge is that these constraints create large-scale mixed-integer programs, which are computationally intensive due to their combinatorial nature and the need for precise integer solutions, making them difficult for standard solvers to handle efficiently. We combine machine learning with traditional MILP solving to speed up the solution process. In this study we evaluate k-nearest-neighbor warm starts, branching hints, screening of post-contingency constraints, and lazy N-1 enforcement. The aim of this article is to identify combinations of techniques that improve solve time without degrading solution quality. Tests across six MATPOWER cases (14 to 300 buses) show that the dominant gains come from reducing or delaying post-contingency constraints: the best configuration reaches up to 25.8x speedup on case89pegase and 8.6x on average across the six benchmark cases, while warm starts and hints provide smaller secondary gains (around 1.1x). Follow-up runs on case1354pegase confirm that constraint-economy variants remain the most effective at larger scales.
+The Security-Constrained Unit Commitment (SCUC) problem determines day-ahead generator schedules for power systems while maintaining grid stability. It requires finding minimum-cost generator commitments that satisfy power flow limits and N-1 security criteria. The challenge is that these constraints create large mixed-integer programs whose post-contingency security constraints dominate the model size. We evaluate learning-guided and solver-native acceleration mechanisms for this setting, including k-nearest-neighbor warm starts, branching hints, screening of post-contingency constraints, and lazy N-1 enforcement. The aim is to identify combinations of techniques that improve solve time without degrading solution quality. Tests across six MATPOWER cases (14 to 300 buses) show that the dominant gains come from reducing or delaying post-contingency constraints: the best configuration reaches up to 25.8x speedup on case89pegase and 9.6x on average across the six benchmark cases, while warm starts and hints provide smaller secondary gains (around 1.1x).
 \keywords{Hybrid approach \and Large-scale problem \and Machine learning \and Mixed-integer linear programming \and Unit commitment.}
 \end{abstract}
 
@@ -42,9 +42,9 @@ On the power grid modeling side, the DC power flow approximation is the standard
 To manage the quadratic growth of contingency constraints, a dynamic constraint generation technique is often adopted~\cite{Tejada2018}.
 In this approach, a subset of potential binding constraints is initially included, and additional constraints can be added as necessary during the branching process~\cite{Tejada2018}. A complementary approach involves screening techniques that aim to discard redundant contingencies in advance using power grid sensitivities or historical data~\cite{Holzer2024}.
 
-Machine learning offers a transformative path forward \cite{Bengio2021}, fundamentally altering the approach to solving the SCUC problem by enabling predictive analytics for commitment schedules~\cite{Xavier2019, Quarm2021}, proactive constraint management~\cite{Donti2021}, and the generation of high-quality initial solutions for MILP solvers~\cite{JimenezCordero2022}. For context, Xavier~\textit{et al.}~\cite{Xavier2019} report up to $4.3\times$ speedup on a 6515-bus system using learned active-set predictors, and Jim{\'e}nez-Cordero \textit{et al.}~\cite{JimenezCordero2022} report roughly $2$--$10\times$ on MIPLIB-style instances for warm-starting constraint generation. Our best average speedup is in the same order of magnitude but is obtained with a substantially simpler learning pipeline (1-NN screening plus lazy LODF-based enforcement) that preserves exact N-1 feasibility by construction. Wrong ML predictions, on the other hand, risk grid reliability: a bad warm start or a missed contingency constraint could translate into blackouts, which motivates our decision to apply machine learning only inside an exact MILP framework.
+Machine learning has been used to predict commitment schedules~\cite{Xavier2019, Quarm2021}, manage constraints proactively~\cite{Donti2021}, and generate high-quality initial solutions for MILP solvers~\cite{JimenezCordero2022}. For context, Xavier~\textit{et al.}~\cite{Xavier2019} report up to $4.3\times$ speedup on a 6515-bus system using learned active-set predictors, and Jim{\'e}nez-Cordero \textit{et al.}~\cite{JimenezCordero2022} report roughly $2$--$10\times$ on MIPLIB-style instances for warm-starting constraint generation. Our best average speedup is in the same order of magnitude but is obtained with a substantially simpler learning pipeline (1-NN screening plus lazy LODF-based enforcement) that preserves exact N-1 feasibility checks. Wrong ML predictions, on the other hand, risk grid reliability: a bad warm start or a missed contingency constraint could translate into blackouts, which motivates our decision to apply machine learning only inside an exact MILP framework.
 
-Our solution is in usage of ML acceleration inside an exact MILP framework. The ML components speed things up, while the MILP guarantees correctness. We test multiple ML techniques - warm starts, branching guidance, constraint screening - both individually and combined, identifying which configurations work best. The electrical grid is modeled using the DC approximation, chosen for its balance of accuracy and computational efficiency. In this model, base-case flows are calculated using Power Transfer Distribution Factors (PTDF), and the impacts of line outages are modeled with Line Outage Distribution Factors (LODF), allowing for a linear and scalable representation of grid dynamics crucial for solving the SCUC problem.
+This paper evaluates learning-guided and solver-native acceleration mechanisms inside an exact MILP workflow. The main empirical question is not whether a complex model can predict the unit commitment solution directly, but which forms of prediction or delayed constraint generation actually reduce wall-clock time while preserving final feasibility checks. The electrical grid is modeled using the DC approximation. Base-case flows are calculated using Power Transfer Distribution Factors (PTDF), and the impacts of line outages are modeled with Line Outage Distribution Factors (LODF), allowing a linear and scalable representation of grid dynamics for the SCUC problem.
 
 \section{Model Definition}
 
@@ -193,9 +193,7 @@ At inference, we screen contingency constraints using a fixed threshold $\theta=
 So the line is kept if the post-contingency flow constraint on the monitored line $\ell$ under the outage of line $m$ is associated with at least one line predicted to be critical by the model.
 
 The GNN model is implemented using PyTorch with NetworkX utilized for generating topology features. The GraphSAGE model employs a hidden size of 64 and is trained with the Adam optimizer at a learning rate of $10^{-3}$.
-Table~\ref{tab:gnn_ablation} reports the downstream effect of replacing the 1-NN screener with the GNN at different $\tau$ thresholds. Across all thresholds, the GNN retains essentially the same fraction of post-contingency constraints as the 1-NN baseline and produces speedups within $\pm 4\%$ of the 1-NN variant (mean ratio between $0.987$ and $1.035$). We attribute this to the fact that the binding contingencies are dominated by a handful of globally critical corridors that the load-conditioned 1-NN already recovers from the historical binding pattern; the additional structural signal learned by the GNN does not move the retained set enough to change solver runtime. We therefore treat the GNN screener as an exploratory ablation rather than as the recommended default.
-
-\input{tables/gnn_vs_1nn.tex}
+Held-out classifier metrics are informative mainly on \texttt{case300}, where positive critical-line labels are present at a non-negligible rate and the retrained GNN reaches precision 0.83, recall 0.51 and F1 0.63; on the smaller cases, held-out positive labels are absent or extremely sparse, so precision and F1 are not well-defined. The downstream ablation in Sec.~\ref{sec:experiments} shows that replacing the 1-NN screener with this GNN does not produce a consistent runtime improvement. We therefore treat the GNN screener as an exploratory negative result rather than as the recommended default.
 
 \paragraph{Lazy Enforcement (LAZY, BANDIT)}
 Instead of adding all post-contingency security constraints to the initial model, N-1 security is enforced dynamically using a lazy constraint callback within the branching process. This base technique is labeled LAZY. At each incumbent integer-feasible solution $(u,p,f)$ found by the solver, post-contingency flows are calculated for each outage $m$ and each monitored line
@@ -212,11 +210,11 @@ K_{t+1}=\begin{cases}
 \arg\max_{K\in\mathcal{K}}\bar{R}_K, & \text{with probability }1-\varepsilon.
 \end{cases}
 \end{equation}
-These lazy enforcement mechanisms are implemented using the solver's native callback API. As we show in Sec.~\ref{sec:experiments}, the bandit layer brings only a marginal improvement over plain LAZY on the benchmark cases reported here, so we report it primarily as a negative result on adaptive cut-budgeting.
+These lazy enforcement mechanisms are implemented using the solver's native callback API. This is also the mechanism that restores feasibility when a screening rule or an aggressive ML-based cut budget omits a post-contingency constraint that is violated by an incumbent solution: the violated constraint is detected, added back to the model, and the incumbent is rejected until the resulting solution satisfies the N-1 audit. As we show in Sec.~\ref{sec:experiments}, the bandit layer brings only a marginal improvement over plain LAZY on the benchmark cases reported here, so we report it primarily as a negative result on adaptive cut-budgeting.
 
 
 \paragraph{Warm Starts (WARM, GRU)}
-To accelerate the discovery of a first feasible solution, the MILP solver is warm-started with initial values derived from machine learning models. A memory-light approach, labeled WARM, uses the 1-NN method described previously to match a new instance with the nearest solved instance in a historical database. The commitment schedules, segment powers, and reserve provisions from the historical solution, denoted as $\big\{u_{g,t},\ p^{\mathrm{seg}}_{g,t,s},\ r_{k,g,t}\big\}_{g,t,s,k}$, are then supplied as the initial values for the corresponding variables in the new problem. To ensure these initial values are solver-friendly, a solver-free repair algorithm is applied. This algorithm enforces minimum up/down times, ramping limits, and generation-load balance through heuristics. For a given commitment schedule $(u_{g,t},v_{g,t},w_{g,t})$ and previous power output $p_{g,t-1}$, the repair routine calculates feasible power bounds at time $t$:
+To accelerate the discovery of a first feasible solution, the MILP solver is warm-started with initial values derived from machine learning models. Warm starts are widely used in MIP workflows because they give the solver an initial incumbent or near-incumbent solution, which can improve primal bounds and guide early branching even when the final proof of optimality is still performed by the exact solver. A memory-light approach, labeled WARM, uses the 1-NN method described previously to match a new instance with the nearest solved instance in a historical database. The commitment schedules, segment powers, and reserve provisions from the historical solution, denoted as $\big\{u_{g,t},\ p^{\mathrm{seg}}_{g,t,s},\ r_{k,g,t}\big\}_{g,t,s,k}$, are then supplied as the initial values for the corresponding variables in the new problem. To ensure these initial values are solver-friendly, a solver-free repair algorithm is applied. This algorithm enforces minimum up/down times, ramping limits, and generation-load balance through heuristics. For a given commitment schedule $(u_{g,t},v_{g,t},w_{g,t})$ and previous power output $p_{g,t-1}$, the repair routine calculates feasible power bounds at time $t$:
 \begin{align}
 p^{\mathrm{lb}}_{g,t}&=\max\!\Big\{u_{g,t}\underline{P}_{g,t},\ p_{g,t-1}-\big(RD_g\,u_{g,t}+SD_g\,w_{g,t}\big)\Big\}, \\
 p^{\mathrm{ub}}_{g,t}&=\min\!\Big\{u_{g,t}\overline{P}_{g,t},\ p_{g,t-1}+RU_g\,u_{g,t-1}+SU_g\,v_{g,t}\Big\}.
@@ -256,16 +254,23 @@ This configuration provides an initial guess (Start), a hint value (VarHintVal),
   \label{fig:ecdf}
 \end{figure*}
 
+\begin{figure*}
+  \centering
+  \includegraphics[width=0.92\linewidth]{figures/speedup_heatmap.png}
+  \caption{Mean speed-up by method and benchmark case. The heatmap replaces the full per-mode speed-up table in the main text; detailed confidence intervals are retained in the released CSV artifacts.}
+  \label{fig:speedup_heatmap}
+\end{figure*}
+
 \begin{figure}
   \centering
-  \includegraphics[width=0.8\textwidth]{figures/speedup_general.png}
-  \caption{Aggregate speedup distribution across all test cases.}
-  \label{fig:Speedup_general}
+  \includegraphics[width=0.95\linewidth]{figures/constraint_reduction_speedup.png}
+  \caption{Final model constraint count and speed-up for representative original modes. Lazy variants start from a smaller root model and add violated N-1 constraints on demand, while PRUNE variants remove screened post-contingency constraints before the solve.}
+  \label{fig:constraint_reduction_speedup}
 \end{figure}
 
-All computational experiments were conducted using the Gurobi 12.1 solver on a machine equipped with an AMD Ryzen 7840HS processor and 32 GB of RAM. The benchmark suite consisted of six MATPOWER cases from the UnitCommitment repository~\cite{Xavier2024}, which were used to formulate a multi-period DC-SCUC with full N-1 security constraints (cases 14, 30, 57, 89pegase, 118 and 300). A follow-up evaluation on \texttt{case1354pegase} (1354 buses, 1991 lines) is reported in Sec.~\ref{sec:large}.
+All computational experiments were conducted using the Gurobi 12.1 solver on a machine equipped with an AMD Ryzen 7840HS processor and 32 GB of RAM. The benchmark suite consisted of six MATPOWER cases from the UnitCommitment repository~\cite{Xavier2024}, which were used to formulate a multi-period DC-SCUC with full N-1 security constraints (cases 14, 30, 57, 89pegase, 118 and 300). To separate learning-driven gains from solver-parameter effects, we also ran a representative \texttt{grbtune} sanity check on RAW instances from case14, case118, and case300; the tuned parameter set was then evaluated against the same default RAW solve.
 
-For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing using a fixed random seed. Only the test split was used for all reported results. The speedups were measured relative to a baseline RAW mode, which represented a complete MILP optimization solved without acceleration techniques. Performance was analyzed using the empirical cumulative distribution function (ECDF) of per-instance speedups. In the revision analysis we additionally computed bootstrap 95\% confidence intervals for the main speedup summaries (reported in Tab.~\ref{tab:speedup_ci}) and paired Wilcoxon signed-rank tests against the RAW baseline.
+For all learning components, the data were split into 70\%/15\%/15\% for training, validation and testing using a fixed random seed. Only the test split was used for all reported results. The speedups were measured relative to a baseline RAW mode, which represented a complete MILP optimization solved without acceleration techniques. Performance was analyzed using the empirical cumulative distribution function (ECDF) of per-instance speedups. In the revision analysis we additionally computed bootstrap 95\% confidence intervals for the main speedup summaries and paired Wilcoxon signed-rank tests against the RAW baseline; the full CI table is released with the paper artifacts.
 
 
 7,702 solver runs were performed across 25 acceleration modes on a final test set of 327 unique problem instances. Total runtime was 73.5 hours. Of these runs, 93.9\% finished with an optimal solution, 4.2\% were infeasible, and 1.9\% terminated due to the time limit.
@@ -273,41 +278,65 @@ For all learning components, the data were split into 70\%/15\%/15\% for trainin
 At the instance level, 95.7\% of the unique instances were solved optimally at least once by one of the tested modes. Smaller cases (14-89 pegase) had a 60-second time limit, while larger cases had a 600-second limit. The training and validation sets were solved over a week.
 
 
-The robustness of each method is detailed in Tab.~\ref{tab:optimal_cases}. This table reports the percentage of instances solved optimally, found infeasible, or timed out. All variants using lazy enforcement or constraint pruning achieved perfect or near-perfect optimality rates across all test cases.
+The robustness audit reports the percentage of instances solved optimally, found infeasible, or timed out for each mode in the released table artifacts. All variants using lazy enforcement or conservative constraint pruning achieved perfect or near-perfect optimality rates across the main benchmark cases.
 
 In contrast, the baseline methods are less robust on larger systems. For example, the RAW+COMMIT variant only solves 71\% of case300 instances optimally within the given time limit, compared to the perfect or near-perfect rates achieved by other methods. For case57, the repeated 77/23/0 pattern is not caused by the acceleration mechanisms: the same 14 dates are reported infeasible by all 23 tested modes, which points to structural infeasibility of those benchmark instances (insufficient reserve after the worst-case contingency) rather than to a screening or warm-start failure. These 14 dates are excluded from the speedup statistics reported below, so they cannot inflate or deflate the reported acceleration factors. In addition, the most aggressive pruning settings can reduce robustness on case300, which indicates that screening must remain conservative if exact feasibility is to be preserved.
 
 Accordingly, the conservative PRUNE-0.10 setting is the recommended screening default in the revised study.
 
-\input{tables/speedup_with_ci.tex}
+\input{tables/main_results_summary.tex}
 
-The speedup factors relative to the RAW baseline are summarized in Tab.~\ref{tab:speedup} and Fig.~\ref{fig:Speedup_general}. The best result for each case is highlighted in bold. The strongest average accelerations are delivered by the most conservative screening method and by lazy enforcement. The WARM+PRUNE-0.10 configuration achieves the highest average speedup of 8.56x across the six benchmark cases. Among the lazy enforcement strategies, WARM+LAZY+BANDIT is the strongest variant in this table, attaining an average speedup of 7.47x, although its advantage over plain WARM+LAZY is marginal (mean ratio of per-instance speedups $\approx 1.00$). The results show that the best method can be case-dependent: pruning excels on case89pegase (mean speedup $25.83$x, 95\% CI $[24.40, 27.26]$), while lazy enforcement dominates the largest case in the main benchmark, case300 (mean speedup $17.38$x, 95\% CI $[15.39, 19.39]$). Tab.~\ref{tab:prune_reduction} shows why: on the larger systems, conservative screening eliminates more than 99.7\% of explicit post-contingency constraints before the solve. Conversely, methods that rely only on warm starts and hints without effective constraint management offer little to no acceleration, underscoring that managing the complexity of N-1 security is the primary driver of performance.
+The speedup factors relative to the RAW baseline are summarized in Tab.~\ref{tab:main_results} and Fig.~\ref{fig:speedup_heatmap}. The strongest average accelerations are delivered by conservative screening and by lazy enforcement. The WARM+PRUNE-0.10 configuration achieves the highest average speedup of 9.64x across the six benchmark cases. Among the lazy enforcement strategies, WARM+LAZY+BANDIT attains an average speedup of 8.61x, although its advantage over plain WARM+LAZY is marginal (mean ratio of per-instance speedups $\approx 1.00$). The results show that the best method can be case-dependent: pruning excels on case89pegase (mean speedup $25.83$x, 95\% CI $[24.40, 27.26]$), while lazy enforcement dominates case300 (mean speedup $17.38$x, 95\% CI $[15.39, 19.39]$). Fig.~\ref{fig:constraint_reduction_speedup} shows that lazy and pruning methods both reduce the root model size relative to RAW, while warm starts alone leave the model size essentially unchanged. Conversely, methods that rely only on warm starts and hints without effective constraint management offer little to no acceleration, underscoring that managing the complexity of N-1 security is the primary driver of performance.
+
+\input{tables/constraint_management_summary.tex}
+
+Tab.~\ref{tab:constraint_management} separates the two mechanisms quantitatively: PRUNE-0.10 removes almost all explicit post-contingency constraints before optimization, whereas LAZY+BANDIT adds only the violated constraints that are discovered during callbacks.
+
+\input{tables/ablation_sanity_summary.tex}
+
+The compact ablation summary in Tab.~\ref{tab:ablation_sanity} clarifies the negative and sanity-check results. The GNN screener produces speedups close to the 1-NN variant, with mean ratios from 0.987 to 1.035 across thresholds, but it does not yield a consistent downstream gain. The fixed-$K$ lazy-cut ablation shows that aggressive cut budgets can be fast on \texttt{case118}, yet on \texttt{case300} all fixed-$K$ settings solve more slowly than plain LAZY/BANDIT and pass the strict violation audit in only 66\% of runs. Finally, Gurobi's built-in parameter tuning gives only 0.93x on a representative \texttt{case118} instance and 1.02x on \texttt{case300}, so it does not explain the order-of-magnitude improvements from constraint management.
 
 The ECDF plot in Fig.~\ref{fig:ecdf}, which contains the most effective methods, illustrates these patterns. PRUNE-0.10 provides consistent gains across the majority of instances. In contrast, the lazy enforcement methods achieve the largest speedups on the most difficult instances, with many runs exceeding a 10x speedup. The paired Wilcoxon tests against RAW confirm that the improvements of WARM+PRUNE-0.10, WARM+LAZY, and WARM+LAZY+BANDIT are statistically significant on every benchmark case ($p<10^{-7}$ in all six cases for each comparison).
 
-These trends are confirmed by the wall-clock runtime statistics in Tab.~\ref{tab:runtime}. For case118, the median time dropped from 43.40 seconds (RAW) to 4.84 seconds with LAZY+BANDIT. For the largest case in the main benchmark, case300, the median runtime improved from 189.90 seconds to just 15 seconds with the same lazy method.
+These trends are also visible in wall-clock runtimes. For case118, the median time dropped from 43.40 seconds (RAW) to 4.84 seconds with WARM+LAZY+BANDIT. For the largest case in the main benchmark, case300, the median runtime improved from 189.90 seconds to just 15 seconds with the same lazy method.
 Across several cases, moderately aggressive pruning can solve instances that the RAW baseline fails on within the time limit because the significantly reduced problem size lets the solver explore the search tree more effectively and find a feasible integer solution faster.
 
-\subsection{Large-case follow-up on \texttt{case1354pegase}}
-\label{sec:large}
+\subsection{Large-Scale Stress Test: \texttt{case1354pegase}}
+\label{sec:case1354}
 
-To check that the qualitative picture extends beyond $\le 300$-bus systems, we ran a follow-up evaluation on \texttt{case1354pegase} (1354 buses, 1991 lines). Because the fully explicit N-1 formulation exceeds 9.2M contingency constraints at the root, we restricted the comparison to variants that either keep the contingency set compact by construction (\texttt{SHRINK\_LAZY}, a reduced-topology reformulation) or generate it on demand (\texttt{ACTIVESET\_LAZY}, \texttt{LAZY\_ALL}, \texttt{WARM\_LAZY}). All modes used a 1-hour time limit.
-The results in Tab.~\ref{tab:large_case} are consistent with the small-case findings: the compact formulation solves roughly $4\times$ faster than the fully explicit lazy baseline (\texttt{LAZY\_ALL}, median $326$\,s vs $1154$\,s), while warm-start-heavy variants (\texttt{WARM\_LAZY}, \texttt{WARM\_SR\_LAZY}) frequently hit the time limit.
-This confirms that on larger systems the dominant bottleneck is still the handling of post-contingency constraints and the quality of the root relaxation, not the absence of branching guidance. We emphasize that \texttt{case1354pegase} (with $\approx 300$ samples per mode still under development) is reported here as a large-scale sanity check rather than as a full statistical evaluation.
+To probe scalability beyond the main six-case benchmark, we ran a single-instance evaluation on \texttt{case1354pegase} (1{,}354 buses, 1{,}991 lines, 1{,}288 N-1 contingencies, 36 time steps), using a 600\,s solver budget and a 5\% MIP-gap target. The full model without contingency constraints already contains 317{,}484 rows; adding all N-1 constraints statically would produce approximately 52.5 million constraints, making a static formulation impractical. All runs therefore use the lazy-enforcement framework. Results are reported in Tab.~\ref{tab:case1354} and Fig.~\ref{fig:case1354_runtime}.
 
-\input{tables/large_case.tex}
+\input{tables/case1354_results.tex}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/case1354_runtime.png}
+\caption{Runtime and N-1 feasibility for \texttt{case1354pegase}.
+  Green bars: N-1 feasible solution found.
+  Red hatched bars: solution found but post-contingency violations detected (constraints not fully enforced within the time limit).
+  Gray bars: no feasible integer solution found within 600\,s.
+  Annotations show the final MIP gap.}
+\label{fig:case1354_runtime}
+\end{figure}
+
+The baseline \texttt{WARM} mode, which applies a warm start but no N-1 constraints, fails to find any feasible integer solution within the budget---the problem is too large for the solver to close even the LP-to-MIP gap without any structural guidance.
+
+The full lazy method (\texttt{LAZY-All}, $K{=}0$) finds an N-1-feasible solution with a 12.3\% MIP gap. Adding ML-guided warm starts helps: \texttt{LAZY+COMMIT} (1-NN commitment hints) achieves the best feasible objective at 8.2\% gap, and \texttt{LAZY+GRU} (GRU dispatch initialiser) reaches 11.4\% gap---both producing verified N-1-feasible solutions within the time limit.
+
+The fixed-$K$ variants (\texttt{LAZY-K64}, \texttt{LAZY-BANDIT}) terminate optimally and faster, but at the cost of N-1 feasibility: they report lower objective values precisely because some violated contingency constraints were never enforced by the callback. \texttt{LAZY-K128} finds no solution at all within the budget, suggesting that an intermediate cut budget can be worse than either extreme ($K{=}0$ or small $K{=}64$).
+
+These results confirm that the lazy-constraint framework scales to systems roughly four times larger than the main benchmark, and that ML-based warm starts (commit hints, GRU dispatch) provide a measurable benefit even at this scale.
 
 \subsection{Limitations and threats to validity}
 \label{sec:limitations}
 
 We list the main limitations of the evaluation so that the claims above can be interpreted correctly.
 \begin{itemize}
-    \item \emph{Scale.} The benchmark cases (14--300 buses) are smaller than production-scale ISO networks (typically $10^4$--$6\!\cdot\!10^4$ buses). The \texttt{case1354pegase} results in Sec.~\ref{sec:large} are included as a large-scale sanity check, not as a full statistical evaluation.
-    \item \emph{Screening reliability.} The 1-NN screener relies on a database of solved instances, whose coverage of operating regimes determines the screening quality. No formal probabilistic guarantee on the fraction of missed binding contingencies is provided; robustness is verified empirically in Tab.~\ref{tab:optimal_cases}.
+    \item \emph{Scale.} The main benchmark cases (14--300 buses) are smaller than production-scale ISO networks (typically $10^4$--$6\!\cdot\!10^4$ buses). The supplementary \texttt{case1354pegase} stress test (Sec.~\ref{sec:case1354}) extends the evaluation to 1{,}354 buses; further scaling to realistic grid sizes remains future work.
+    \item \emph{Screening reliability.} The 1-NN screener relies on a database of solved instances, whose coverage of operating regimes determines the screening quality. No formal probabilistic guarantee on the fraction of missed binding contingencies is provided; robustness is verified empirically through the final feasibility and violation audits.
     \item \emph{Uncertainty.} The formulation is deterministic: renewable variability, load forecasting errors, and stochastic reserve requirements are not modeled.
     \item \emph{Data splits.} Learning components are trained on a single 70\%/15\%/15\% split with a fixed seed. Cross-validation of the resulting speedups is left for future work; the reported Wilcoxon tests concern per-instance differences, not split-level stability.
-    \item \emph{Solver tuning.} We compare against the default Gurobi configuration. A systematic comparison with Gurobi's built-in parameter tuning (\texttt{grbtune}) is an important next step, because part of the speedup delivered by our compact formulations may also be achievable via automated tuning.
-    \item \emph{Negative results.} The GNN screener (Tab.~\ref{tab:gnn_ablation}), the GRU initializer, and the BANDIT lazy-cut budget are reported here as ablations that did not outperform the simpler baselines; they should be interpreted as negative or inconclusive results in the present benchmark rather than as recommended techniques.
+    \item \emph{Solver tuning.} We performed a representative \texttt{grbtune} sanity check on RAW instances from \texttt{case14}, \texttt{case118}, and \texttt{case300} (Tab.~\ref{tab:ablation_sanity}). The tuned baseline was essentially unchanged on the tiny case14 instance, slightly slower on \texttt{case118} (0.93x), and only 1.02x faster on \texttt{case300}, far below the gains from constraint screening or lazy enforcement. This does not replace a full tuning study over every instance, but it suggests that the reported gains are not explained by parameter tuning alone.
+    \item \emph{Negative results.} The GNN screener, the GRU initializer, and the BANDIT lazy-cut budget are reported here as ablations that did not reliably outperform the simpler baselines; they should be interpreted as negative or inconclusive results in the present benchmark rather than as recommended techniques.
 \end{itemize}
 
 \paragraph{Reproducibility.} All ML training pipelines, solver wrappers, and post-processing scripts used to produce the tables and figures in this section will be released as an open-source repository at \url{https://github.com/nemakgregor/SCUCa} together with the benchmark instances and the raw per-instance runtime logs. The main limitations of the evaluation are summarized in Sec.~\ref{sec:limitations}.
@@ -316,110 +345,11 @@ We list the main limitations of the evaluation so that the claims above can be i
 
 This study demonstrates that, among the methods considered in this work, the most effective way to accelerate a raw mixed-integer linear programming (MILP) formulation of the security-constrained unit commitment (SCUC) problem is to reduce or delay post-contingency constraints while maintaining exact feasibility checks. Across 327 instances of the MATPOWER cases (7702 runs), solved using Gurobi 12.1 on a Ryzen 7840HS/32GB system, two strategies showed the largest and most consistent improvements. The first is screening redundant contingencies prior to solving the model using simple data-driven predictors and LODF/PTDF sensitivities. The second is generating only the necessary contingency constraints on demand during the branching process.
 
-Conservative screening thresholds preserved optimality in all instances, and lazy generation often achieved the best performance on the hardest individual instances. In aggregate, the strongest screening threshold produced the highest average speedup (approximately $8.6\times$ over a fully explicit baseline), while lazy generation dominated the largest case in the main benchmark. The revision analysis also shows that these gains coincide with very large reductions in explicit contingency constraints, typically above 99.7\% on the larger systems, and are statistically significant on every benchmark case (paired Wilcoxon $p<10^{-7}$). The follow-up runs on \texttt{case1354pegase} confirm the same qualitative picture at a much larger scale.
+Conservative screening thresholds preserved optimality in all instances, and lazy generation often achieved the best performance on the hardest individual instances. In aggregate, the strongest screening threshold produced the highest average speedup (approximately $9.6\times$ over a fully explicit baseline), while lazy generation dominated the largest case in the benchmark. The revision analysis also shows that these gains coincide with very large reductions in explicit contingency constraints, typically above 99.7\% on the larger systems, and are statistically significant on every benchmark case (paired Wilcoxon $p<10^{-7}$).
 
 Learning signals applied to the discrete search, including warm starts from historical solutions, lightweight initializers, and branching guidance based on commitment probability, yielded smaller average speedups (around $1.1\times$). In our benchmark, the GNN screener did not consistently outperform the simpler 1-NN baseline, the GRU initializer was unstable on smaller cases, and the adaptive BANDIT policy improved only marginally over plain LAZY. These observations support a ``constraint-economy first'' design: shrink or postpone the contingency set, verify security with exact checks, and only then add inexpensive learning cues to guide the search.
 
-Future work will focus on adapting screening thresholds online, coupling screening with lazy generation in a unified policy, developing reliability-aware predictors with formal guarantees, and benchmarking against Gurobi's built-in automated parameter tuner on the same instances.
-
-
-
-
-\begin{sidewaystable*}\centering
-\caption{Optimal case results for all modes (\% optimal / \% infeasible / \% time limit).}
-\label{tab:optimal_cases}
-\renewcommand{\arraystretch}{1.2}
-\footnotesize
-\begin{tabular}{|l||c|c|c|c|c|c|c|}\hline\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
-RAW+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 98/0/2 & 71/0/29 \\ \hline
-RAW+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 71/0/29 \\ \hline
-WARM & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+HINTS & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 80/0/20 \\ \hline
-WARM+HINTS+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 80/0/20 \\ \hline
-WARM+HINTS+COMMIT+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+HINTS+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 83/0/17 \\ \hline
-WARM+LAZY & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+BANDIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+COMMIT & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+LAZY+GRU & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.10 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.10+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.20 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.20+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.30 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.30+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.50 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.50+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 100/0/0 \\ \hline
-WARM+PRUNE-0.80 & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 93/0/7 \\ \hline
-WARM+PRUNE-0.80+GNN & 100/0/0 & 100/0/0 & 77/23/0 & 100/0/0 & 100/0/0 & 92/0/8 \\ \hline
-\end{tabular}
-\end{sidewaystable*}
-
-\begin{sidewaystable*}\centering
-\caption{Speed-up factors across cases and modes (mean across cases; per-case 95\% CI is reported separately in Tab.~\ref{tab:speedup_ci} for the most important modes).}
-\label{tab:speedup}
-\renewcommand{\arraystretch}{1.2}
-\footnotesize
-\begin{tabular}{|l||c|c|c|c|c|c|c|}\hline\textbf{Mode} & \textbf{case14} & \textbf{case30} & \textbf{case57} & \textbf{case89pegase} & \textbf{case118} & \textbf{case300} \\ \hline \hline
-RAW+COMMIT & 1.07x & 1.03x & 1.05x & 1.09x & 1.02x & 1.03x \\ \hline
-RAW+GNN & 1.05x & 1.02x & 1.03x & 1.09x & 1.01x & 1.02x \\ \hline
-WARM & 1.06x & 0.98x & 1.19x & 1.43x & 1.02x & 1.18x \\ \hline
-WARM+HINTS & 1.07x & 0.96x & 1.19x & 1.41x & 1.01x & 1.17x \\ \hline
-WARM+HINTS+COMMIT & 1.07x & 0.94x & 1.21x & 1.43x & 1.01x & 1.18x \\ \hline
-WARM+HINTS+COMMIT+GRU & 0.85x & 0.92x & 1.02x & 1.08x & 1.02x & 1.17x \\ \hline
-WARM+HINTS+GRU & 0.87x & 0.93x & 0.99x & 1.07x & 1.01x & 1.16x \\ \hline
-WARM+LAZY & 1.65x & \textbf{1.84x} & 6.25x & 12.77x & 8.97x & \textbf{13.14x} \\ \hline
-WARM+LAZY+BANDIT & \textbf{1.77x} & 1.84x & \textbf{6.30x} & 12.82x & \textbf{9.00x} & 13.11x \\ \hline
-WARM+LAZY+COMMIT & 1.76x & 1.84x & 6.27x & 12.80x & 8.86x & 13.08x \\ \hline
-WARM+LAZY+GRU & 1.45x & 1.62x & 5.03x & 12.45x & 8.95x & 13.09x \\ \hline
-WARM+PRUNE-0.10 & 1.35x & 1.41x & 5.84x & \textbf{25.83x} & 8.11x & 8.81x \\ \hline
-WARM+PRUNE-0.10+GNN & 1.28x & 1.41x & 5.75x & 25.75x & 8.06x & 8.81x \\ \hline
-WARM+PRUNE-0.20 & 1.30x & 1.40x & 5.73x & 21.51x & 7.95x & 8.12x \\ \hline
-WARM+PRUNE-0.20+GNN & 1.33x & 1.46x & 5.86x & 21.18x & 7.92x & 8.11x \\ \hline
-WARM+PRUNE-0.30 & 1.34x & 1.41x & 5.84x & 16.22x & 7.29x & 6.09x \\ \hline
-WARM+PRUNE-0.30+GNN & 1.34x & 1.42x & 5.73x & 16.18x & 7.21x & 6.02x \\ \hline
-WARM+PRUNE-0.50 & 1.27x & 1.44x & 5.64x & 3.92x & 3.06x & 3.37x \\ \hline
-WARM+PRUNE-0.50+GNN & 1.31x & 1.43x & 5.68x & 3.92x & 3.05x & 3.41x \\ \hline
-WARM+PRUNE-0.80 & 1.30x & 1.44x & 4.82x & 2.43x & 1.04x & 1.64x \\ \hline
-WARM+PRUNE-0.80+GNN & 1.29x & 1.45x & 4.76x & 2.42x & 1.05x & 1.63x \\ \hline
-\end{tabular}
-\end{sidewaystable*}
-
-
-\begin{sidewaystable*}
-\label{tab:runtime}
-\renewcommand{\arraystretch}{1.2}
-\footnotesize
-\caption{Global runtime statistics (median [min--max])}
-\begin{tabular}{|l||c|c|c|c|c|c|c|c|c|}\hline
-\textbf{Case} & \textbf{RAW} & \textbf{WARM+LAZY+BANDIT} & \textbf{WARM+PRUNE-0.10} & \textbf{OTHER} \\ \hline \hline
-case14 & 0.08 [0.06 - 0.13] & 0.05 [0.03 - 0.07] & 0.06 [0.04 - 0.11] & 0.07 [0.03 - 0.17] \\ \hline
-case30 & 0.15 [0.12 - 0.22] & 0.08 [0.06 - 0.17] & 0.11 [0.06 - 0.19] & 0.12 [0.06 - 0.26] \\ \hline
-case57 & 0.65 [0.54 - 0.77] & 0.11 [0.08 - 0.20] & 0.12 [0.08 - 0.22] & 0.29 [0.07 - 0.91] \\ \hline
-case89pegase & 12.31 [9.19 - 16.84] & 0.97 [0.75 - 1.37] & 0.49 [0.33 - 0.84] & 4.90 [0.35 - 16.24] \\ \hline
-case118 & 43.40 [25.79 - 66.25] & 4.84 [3.74 - 7.67] & 5.69 [3.27 - 20.86] & 23.96 [3.12 - 96.22] \\ \hline
-case300 & 189.90 [135.81 - 393.03] & 15.00 [11.32 - 20.48] & 22.12 [13.17 - 33.90] & 92.45 [11.26 - 397.51] \\ \hline
-\end{tabular}
-\end{sidewaystable*}
-
-\begin{table}[t]
-\centering
-\caption{Average explicit post-contingency constraints retained by WARM+PRUNE-0.10 after screening.}
-\label{tab:prune_reduction}
-\small
-\begin{tabular}{lrrr}
-\hline
-\textbf{Case} & \textbf{Initial} & \textbf{Retained} & \textbf{Reduction} \\
-\hline
-case14 & 24,624 & 0 & 100.00\% \\
-case30 & 86,112 & 0 & 100.00\% \\
-case57 & 441,936 & 0 & 100.00\% \\
-case89pegase & 2,459,952 & 504 & 99.98\% \\
-case118 & 1,555,992 & 1,026 & 99.94\% \\
-case300 & 4,329,720 & 9,109 & 99.79\% \\
-\hline
-\end{tabular}
-\end{table}
+Future work will focus on adapting screening thresholds online, coupling screening with lazy generation in a unified policy, developing reliability-aware predictors with formal guarantees, and extending solver-tuning comparisons from representative instances to the full benchmark.
 
 
 \begin{thebibliography}{99}

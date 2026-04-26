@@ -31,6 +31,7 @@ from pathlib import Path
 import pandas as pd
 from gurobipy import GRB
 
+from src.data_preparation.params import DataParams
 from src.data_preparation.read_data import read_benchmark
 from src.optimization_model.SCUC_solver.scuc_model_builder import build_model
 
@@ -42,16 +43,29 @@ TABLES_DIR.mkdir(exist_ok=True)
 
 
 def _pick_representative_instance(case_folder: str) -> str:
-    """Pick a single test instance; prefer a mid-size load date for stability."""
-    # deterministic choice: the first instance alphabetically that is solvable by RAW
-    # We use a known good date from the existing benchmark logs.
+    """Pick a single locally available instance; prefer known stable dates."""
     defaults = {
         "matpower/case118": "matpower/case118/2017-01-10",
         "matpower/case300": "matpower/case300/2017-01-04",
         "matpower/case89pegase": "matpower/case89pegase/2017-01-10",
         "matpower/case1354pegase": "matpower/case1354pegase/2017-01-01",
     }
-    return defaults.get(case_folder, f"{case_folder}/2017-01-10")
+    preferred = defaults.get(case_folder)
+    if preferred is not None:
+        preferred_path = DataParams._CACHE / f"{preferred}.json.gz"
+        if preferred_path.exists():
+            return preferred
+
+    case_dir = (DataParams._CACHE / case_folder).resolve()
+    if case_dir.exists():
+        candidates = sorted(case_dir.glob("*.json.gz"))
+        if candidates:
+            rel = candidates[0].resolve().relative_to(DataParams._CACHE.resolve()).as_posix()
+            if rel.endswith(".json.gz"):
+                rel = rel[: -len(".json.gz")]
+            return rel
+
+    return preferred or f"{case_folder}/2017-01-10"
 
 
 def _build_and_export(instance: str, mps_path: Path):

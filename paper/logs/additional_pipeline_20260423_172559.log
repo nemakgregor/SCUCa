@@ -1,0 +1,7 @@
+=== Additional reviewer experiments pipeline ===
+log: /Users/gregor/Documents/SK_R/SCUCa/paper/logs/additional_pipeline_20260423_172559.log
+[preflight] repo root: /Users/gregor/Documents/SK_R/SCUCa
+[preflight] python: /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/artifacts/gnn_screening
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/solutions/test/raw
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/solutions/train/lazy_all

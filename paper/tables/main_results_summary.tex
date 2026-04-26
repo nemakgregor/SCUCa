@@ -1,0 +1,37 @@
+\begin{table}[t]\centering
+\caption{Summary over the common comparison mode set. Mean speed-up is averaged over the cases where the mode was evaluated; fixed-$K$ and \texttt{grbtune} rows are reviewer-added sanity checks with fewer available cases.}
+\label{tab:main_results}
+\small
+\begin{tabularx}{\linewidth}{lrrrrX}
+\hline
+\textbf{Mode} & \textbf{Mean} & \textbf{Best case} & \textbf{Opt.} & \textbf{Cases} & \textbf{Interpretation} \\
+\hline
+\texttt{RAW} & 1.00x & case118 (1.00x) & 91\% & 6 &  \\
+\texttt{RAW+COMMIT} & 1.04x & case89pegase (1.09x) & 91\% & 6 & Branching guidance alone \\
+\texttt{RAW+GNN} & 1.08x & case118 (1.28x) & 91\% & 6 & Raw model with GNN metadata \\
+\texttt{WARM} & 1.14x & case89pegase (1.43x) & 93\% & 6 & Nearest-neighbor warm start \\
+\texttt{WARM+HINTS} & 1.13x & case89pegase (1.41x) & 93\% & 6 & Warm start plus hints \\
+\texttt{WARM+HINTS+COMMIT} & 1.14x & case89pegase (1.43x) & 93\% & 6 & Warm start plus commitment guidance \\
+\texttt{WARM+HINTS+COMMIT+GRU} & 1.03x & case300 (1.25x) & 93\% & 6 & GRU warm-start ablation \\
+\texttt{WARM+HINTS+GRU} & 1.03x & case300 (1.24x) & 93\% & 6 & GRU warm-start ablation \\
+\texttt{WARM+LAZY} & 8.59x & case300 (17.35x) & 96\% & 6 & Exact lazy N-1 enforcement \\
+\texttt{WARM+LAZY+BANDIT} & 8.61x & case300 (17.38x) & 96\% & 6 & Adaptive lazy cut budget \\
+\texttt{WARM+LAZY+COMMIT} & 8.59x & case300 (17.39x) & 96\% & 6 & Lazy with commitment guidance \\
+\texttt{WARM+LAZY+GRU} & 8.21x & case300 (17.42x) & 96\% & 6 & Lazy with GRU warm start \\
+\texttt{WARM+PRUNE-0.10} & 9.64x & case89pegase (25.83x) & 96\% & 6 & Conservative screening \\
+\texttt{WARM+PRUNE-0.10+GNN} & 9.58x & case89pegase (25.75x) & 96\% & 6 & Conservative screening + GNN \\
+\texttt{WARM+PRUNE-0.20} & 8.68x & case89pegase (21.51x) & 96\% & 6 & Screening ablation \\
+\texttt{WARM+PRUNE-0.20+GNN} & 8.63x & case89pegase (21.18x) & 96\% & 6 & Screening + GNN ablation \\
+\texttt{WARM+PRUNE-0.30} & 6.96x & case89pegase (16.22x) & 96\% & 6 & Screening ablation \\
+\texttt{WARM+PRUNE-0.30+GNN} & 6.90x & case89pegase (16.18x) & 96\% & 6 & Screening + GNN ablation \\
+\texttt{WARM+PRUNE-0.50} & 3.56x & case57 (8.16x) & 96\% & 6 & Aggressive screening \\
+\texttt{WARM+PRUNE-0.50+GNN} & 3.61x & case57 (8.14x) & 96\% & 6 & Aggressive screening + GNN \\
+\texttt{WARM+PRUNE-0.80} & 2.39x & case57 (6.50x) & 95\% & 6 & Very aggressive screening \\
+\texttt{WARM+PRUNE-0.80+GNN} & 2.42x & case57 (6.44x) & 95\% & 6 & Very aggressive screening + GNN \\
+\texttt{WARM+LAZY+K64} & 7.79x & case118 (11.42x) & 89\% & 3 & Fixed-K lazy ablation \\
+\texttt{WARM+LAZY+K128} & 8.06x & case118 (18.36x) & 73\% & 6 & Fixed-K lazy ablation \\
+\texttt{WARM+LAZY+K256} & 12.99x & case118 (18.71x) & 83\% & 2 & Fixed-K lazy ablation \\
+\texttt{GRBTUNE} & 1.00x & case14 (1.05x) & 100\% & 3 & Gurobi tuning sanity check \\
+\hline
+\end{tabularx}
+\end{table}

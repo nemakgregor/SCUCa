@@ -1,17 +1,15 @@
 \begin{table}[t]\centering
-\caption{Follow-up large-case evaluation on \texttt{case1354pegase} (1354 buses, 1991 lines). Modes with a compact formulation (\texttt{SHRINK\_LAZY}) or an active-set subset of contingencies (\texttt{ACTIVESET\_LAZY}) solve within the time limit, while the fully explicit \texttt{WARM\_LAZY} variant frequently hits the 1-hour limit.}
+\caption{Auxiliary runtime sanity check on \texttt{case300} for lazy and warm-lazy variants.}
 \label{tab:large_case}
 \small
 \begin{tabular}{lrrrrrr}
 \hline
 \textbf{Mode} & \textbf{n} & \textbf{Opt.\ rate} & \textbf{TL rate} & \textbf{Median [s]} & \textbf{Root constr.} & \textbf{Lazy added} \\
 \hline
-\texttt{SHRINK_LAZY} & 8 & 25\% & 0\% & 326 & 81,416 & 0 \\
-\texttt{ACTIVESET_LAZY} & 8 & 25\% & 0\% & 917 & 366,264 & 775,670 \\
-\texttt{LAZY_ALL} & 12 & 33\% & 17\% & 1154 & 366,264 & 2,561,796 \\
-\texttt{WARM_LAZY} & 12 & 25\% & 17\% & 2654 & 366,264 & 3,212,739 \\
-\texttt{WARM_SR_LAZY} & 12 & 0\% & 33\% & 3603 & 9,245,412 & 0 \\
-\texttt{STREDUCE_LAZY} & 8 & 0\% & 0\% & -- & -- & -- \\
+\texttt{WARM_LAZY} & 6 & 100\% & 0\% & 23 & 71,784 & 7,906 \\
+\texttt{SHRINK_LAZY} & 6 & 100\% & 0\% & 27 & 15,959 & 0 \\
+\texttt{LAZY_ALL} & 6 & 100\% & 0\% & 27 & 71,784 & 8,264 \\
+\texttt{WARM_SR_LAZY} & 6 & 100\% & 0\% & 433 & 3,385,032 & 2,212 \\
 \hline
 \end{tabular}
 \end{table}

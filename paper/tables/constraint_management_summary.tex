@@ -1,0 +1,37 @@
+\begin{table}[t]\centering
+\caption{Constraint management over the common comparison mode set. Final constraints are reported relative to RAW; explicit removal applies to PRUNE modes; lazy-added constraints are callback additions observed in the reviewer ablations where available.}
+\label{tab:constraint_management}
+\footnotesize
+\begin{tabular}{lrrrrr}
+\hline
+\textbf{Mode} & \textbf{Cases} & \textbf{Speed-up} & \textbf{Final constr.} & \textbf{Explicit removed} & \textbf{Lazy added} \\
+\hline
+\texttt{RAW} & 6 & 1.00x & 100.0\% & -- & -- \\
+\texttt{RAW+COMMIT} & 6 & 1.04x & 100.0\% & -- & -- \\
+\texttt{RAW+GNN} & 6 & 1.08x & 99.7\% & -- & -- \\
+\texttt{WARM} & 6 & 1.14x & 100.0\% & -- & -- \\
+\texttt{WARM+HINTS} & 6 & 1.13x & 100.0\% & -- & -- \\
+\texttt{WARM+HINTS+COMMIT} & 6 & 1.14x & 100.0\% & -- & -- \\
+\texttt{WARM+HINTS+COMMIT+GRU} & 6 & 1.03x & 100.0\% & -- & -- \\
+\texttt{WARM+HINTS+GRU} & 6 & 1.03x & 100.0\% & -- & -- \\
+\texttt{WARM+LAZY} & 6 & 8.59x & 5.0\% & -- & 9,863 \\
+\texttt{WARM+LAZY+BANDIT} & 6 & 8.61x & 5.0\% & -- & 721 \\
+\texttt{WARM+LAZY+COMMIT} & 6 & 8.59x & 5.0\% & -- & 7,897 \\
+\texttt{WARM+LAZY+GRU} & 6 & 8.21x & 5.0\% & -- & 12,444 \\
+\texttt{WARM+PRUNE-0.10} & 6 & 9.64x & 5.0\% & 99.95\% & -- \\
+\texttt{WARM+PRUNE-0.10+GNN} & 6 & 9.58x & 5.0\% & 99.95\% & -- \\
+\texttt{WARM+PRUNE-0.20} & 6 & 8.68x & 5.1\% & 99.88\% & -- \\
+\texttt{WARM+PRUNE-0.20+GNN} & 6 & 8.63x & 5.1\% & 99.88\% & -- \\
+\texttt{WARM+PRUNE-0.30} & 6 & 6.96x & 5.4\% & 99.53\% & -- \\
+\texttt{WARM+PRUNE-0.30+GNN} & 6 & 6.90x & 5.4\% & 99.53\% & -- \\
+\texttt{WARM+PRUNE-0.50} & 6 & 3.56x & 7.9\% & 97.00\% & -- \\
+\texttt{WARM+PRUNE-0.50+GNN} & 6 & 3.61x & 7.8\% & 97.02\% & -- \\
+\texttt{WARM+PRUNE-0.80} & 6 & 2.39x & 22.5\% & 81.88\% & -- \\
+\texttt{WARM+PRUNE-0.80+GNN} & 6 & 2.42x & 22.4\% & 81.96\% & -- \\
+\texttt{WARM+LAZY+K64} & 3 & 7.79x & -- & -- & -- \\
+\texttt{WARM+LAZY+K128} & 6 & 8.06x & 5.0\% & -- & 2,323 \\
+\texttt{WARM+LAZY+K256} & 2 & 12.99x & -- & -- & -- \\
+\texttt{GRBTUNE} & 3 & 1.00x & -- & -- & -- \\
+\hline
+\end{tabular}
+\end{table}

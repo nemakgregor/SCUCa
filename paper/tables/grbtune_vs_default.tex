@@ -1,0 +1,14 @@
+\begin{table}[t]\centering
+\caption{Gurobi parameter tuning sanity check on representative instances. The speed-up is the default runtime divided by the tuned runtime; values below one indicate a slower tuned run.}
+\label{tab:grbtune}
+\small
+\begin{tabular}{lrrrr}
+\hline
+\textbf{Case} & \textbf{Default [s]} & \textbf{Tuned [s]} & \textbf{Speed-up} & \textbf{Tune wall [s]} \\
+\hline
+case118 & 16.08 & 17.32 & 0.93x & 1770 \\
+case14 & 0.05 & 0.05 & 1.05x & 5 \\
+case300 & 278.63 & 272.58 & 1.02x & 3609 \\
+\hline
+\end{tabular}
+\end{table}

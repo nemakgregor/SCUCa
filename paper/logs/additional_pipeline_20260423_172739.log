@@ -1,0 +1,115 @@
+=== Additional reviewer experiments pipeline ===
+log: /Users/gregor/Documents/SK_R/SCUCa/paper/logs/additional_pipeline_20260423_172739.log
+[preflight] repo root: /Users/gregor/Documents/SK_R/SCUCa
+[preflight] python: /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/artifacts/gnn_screening
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/solutions/test/raw
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/paper_upto1354_fullmodes_2026-04-17/solutions/train/lazy_all
+[preflight] found /Users/gregor/Documents/SK_R/SCUCa/results/raw_logs
+$ /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python -c 'import gurobipy, pandas, numpy; print('"'"'ok base libs'"'"', gurobipy.gurobi.version())'
+ok base libs (12, 0, 3)
+$ /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python -c 'import torch, torch_geometric; print('"'"'ok gnn libs'"'"', torch.__version__, torch_geometric.__version__)'
+ok gnn libs 2.8.0 2.6.1
+=== Smoke checks ===
+[smoke] GNN retrain-if-needed on case14
+$ /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python paper/scripts/eval_gnn_precision_recall.py --case-folders matpower/case14 --retrain-if-needed --epochs 1 --max-train-instances 2 --max-test-instances 2
+/Users/gregor/Documents/SK_R/SCUCa/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+[eval] matpower/case14
+[eval] matpower/case14: archived in_dim=11 incompatible with current feature_dim=7.
+wrote /Users/gregor/Documents/SK_R/SCUCa/paper/tables/gnn_pr_f1.csv
+wrote /Users/gregor/Documents/SK_R/SCUCa/paper/tables/gnn_pr_f1.tex
+[smoke] fixed-K WARM+LAZY on case14, K=64, one test instance
+$ /Users/gregor/Documents/SK_R/SCUCa/venv/bin/python -m src.paper.experiments --cases matpower/case14 --modes WARM+LAZY --lazy-top-k 64 --time-limit 30 --limit-test 1 --train-use-existing-only
+/Users/gregor/Documents/SK_R/SCUCa/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+WARNING:src.optimization_model.SCUC_solver.solve_instances:Failed to fetch listing 'https://axavier.org/UnitCommitment.jl/0.4/instances/matpower/': HTTPSConnectionPool(host='axavier.org', port=443): Max retries exceeded with url: /UnitCommitment.jl/0.4/instances/matpower/ (Caused by NameResolutionError("HTTPSConnection(host='axavier.org', port=443): Failed to resolve 'axavier.org' ([Errno 8] nodename nor servname provided, or not known)"))
+WARNING:src.optimization_model.SCUC_solver.solve_instances:Failed to fetch listing 'https://axavier.org/UnitCommitment.jl/0.4/instances/test/': HTTPSConnectionPool(host='axavier.org', port=443): Max retries exceeded with url: /UnitCommitment.jl/0.4/instances/test/ (Caused by NameResolutionError("HTTPSConnection(host='axavier.org', port=443): Failed to resolve 'axavier.org' ([Errno 8] nodename nor servname provided, or not known)"))
+[matpower/case14] total=30 | train=18 val=5 test=1
+[matpower/case14] Stage A: skipping TRAIN solve (use-existing-only=True).
+[matpower/case14] Warm index trained=True, coverage=0.033
+[matpower/case14] logging to results/raw_logs/exp_matpower_case14_20260423_172748.csv
+
+matpower/case14 TEST:   0%|          | 0/1 [00:00<?, ?inst/s]
+                                                             
+
+matpower/case14 TEST:   0%|          | 0/1 [00:00<?, ?inst/s]INFO:__main__:Solving matpower/case14/2017-01-05 with WARM+LAZY+K64
+[run] matpower/case14/2017-01-05 | WARM+LAZY+K64
+Set parameter Username
+Set parameter LicenseID to value 2810095
+Academic license - for non-commercial use only - expires 2027-04-17
+INFO:src.optimization_model.SCUC_solver.scuc_model_builder:SCUC build: units=5, buses=14, lines=20, reserves=1, contingencies=19, T=36, dt(min)=60
+INFO:src.optimization_model.SCUC_solver.scuc_model_builder:PTDF/ISF shape=(20, 13), nnz=248; LODF shape=(20, 20), nnz=362; ref_bus_index(1-based)=1
+INFO:src.optimization_model.solver.scuc.vars.commitment:Vars(V-201): commitment u[g,t] added=180
+INFO:src.optimization_model.solver.scuc.vars.segment_power:Vars(V-202): segment power pseg[g,t,s] added=720 (gens=5, total_segments=20, T=36)
+INFO:src.optimization_model.solver.scuc.vars.startup_shutdown:Vars(V-205/V-206): startup/shutdown added=360 (pairs=180)
+INFO:src.optimization_model.solver.scuc.vars.reserve:Vars(V-203/V-204): reserve r[k,g,t] added=180 (eligible_pairs=5*T), shortfall s[k,t] added=36
+INFO:src.optimization_model.solver.scuc.vars.line_flow:Vars(V-207/208/209): line_flow=720, overflow_pos=720, overflow_neg=720 (lines=20, T=36)
+INFO:src.optimization_model.solver.scuc.vars.contingency_overflow:Vars(V-212/V-213): contingency overflow slacks added=1440 (lines=20, T=36)
+INFO:src.optimization_model.solver.scuc.constraints.commitment_fixing:Cons(C-101): commitment fixing on=0, off=0, total=0
+INFO:src.optimization_model.solver.scuc.constraints.linking:Cons(C-102): segment capacity linking added=720
+INFO:src.optimization_model.solver.scuc.constraints.power_balance_segmented:Cons(C-103): power balance equalities added=36
+INFO:src.optimization_model.solver.scuc.constraints.initial_conditions:Cons(C-106/C-107): start/stop def=180, exclusivity=180, ramping=360 (total=720)
+INFO:src.optimization_model.solver.scuc.constraints.min_up_down:Cons(C-110/111/112): min_up=180, min_down=180, initial_on=0, initial_off=0, total=360
+INFO:src.optimization_model.solver.scuc.constraints.reserve:Cons(C-104): reserve headroom linking added=180
+INFO:src.optimization_model.solver.scuc.constraints.reserve_requirement:Cons(C-105): reserve requirement added=36
+INFO:src.optimization_model.solver.scuc.constraints.line_flow_ptdf:Cons(C-108): line flow PTDF equalities added=720 (ISF shape=(20, 13) nnz=248, ref_bus=1)
+INFO:src.optimization_model.solver.scuc.constraints.line_limits:Cons(C-109): line limits added=1440 (lines=20, T=36)
+INFO:src.optimization_model.solver.scuc.objectives.power_cost_segmented:Obj(O-301): objective assembled from modular terms.
+Set parameter LazyConstraints to value 1
+Set parameter OutputFlag to value 1
+Set parameter MIPGap to value 0.05
+Set parameter TimeLimit to value 30
+Set parameter NumericFocus to value 1
+Set parameter LazyConstraints to value 1
+Gurobi Optimizer version 12.0.3 build v12.0.3rc0 (mac64[arm] - Darwin 25.4.0 25E253)
+
+CPU model: Apple M4 Pro
+Thread count: 14 physical cores, 14 logical processors, using up to 14 threads
+
+Non-default parameters:
+TimeLimit  30
+MIPGap  0.05
+NumericFocus  1
+LazyConstraints  1
+
+Optimize a model with 4212 rows, 5076 columns and 27005 nonzeros
+Model fingerprint: 0xe0facdd9
+Variable types: 4536 continuous, 540 integer (540 binary)
+Coefficient statistics:
+  Matrix range     [4e-04, 3e+02]
+  Objective range  [3e+01, 3e+04]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 4e+02]
+Presolve removed 2204 rows and 736 columns
+Presolve time: 0.02s
+Presolved: 2008 rows, 4340 columns, 9495 nonzeros
+Variable types: 3816 continuous, 524 integer (524 binary)
+Found heuristic solution: objective 451224.86575
+
+Root relaxation: interrupted, 659 iterations, 0.01 seconds (0.01 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0          -    0      451224.866 451074.338  0.03%     -    0s
+
+Explored 1 nodes (659 simplex iterations) in 0.03 seconds (0.05 work units)
+Thread count was 14 (of 14 available processors)
+
+Solution count 1: 451225 
+
+Optimal solution found (tolerance 5.00e-02)
+Best objective 4.512248657491e+05, best bound 4.510743380501e+05, gap 0.0334%
+
+                                                             
+
+matpower/case14 TEST:   0%|          | 0/1 [00:00<?, ?inst/s]INFO:__main__:Done matpower/case14/2017-01-05 | WARM+LAZY+K64      | status=OPTIMAL time=0.02803492546081543s
+
+matpower/case14 TEST: 100%|██████████| 1/1 [00:00<00:00,  4.66inst/s]
+matpower/case14 TEST: 100%|██████████| 1/1 [00:00<00:00,  4.66inst/s]
+  matpower/case14/2017-01-05 |      WARM+LAZY+K64 | status=OPTIMAL      time=0.02803492546081543s nodes=1
+[matpower/case14] done. Log: results/raw_logs/exp_matpower_case14_20260423_172748.csv
+[aggregate] wrote /Users/gregor/Documents/SK_R/SCUCa/paper/tables/lazy_topk_ablation.csv
+=== Smoke checks passed ===
+Smoke-only mode: stopping here.

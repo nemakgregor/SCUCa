@@ -582,7 +582,8 @@ def _solve_raw(
             model.Params.LazyConstraints = 1
     except Exception:
         pass
-    model.optimize()
+    _lazy_cb = getattr(model, "_lazy_contingency_callback", None)
+    model.optimize(_lazy_cb)
 
     try:
         save_solution_as_json(sc, model, instance_name=instance_name)
@@ -772,7 +773,8 @@ def _solve_warm(
     except Exception:
         pass
 
-    model.optimize()
+    _lazy_cb = getattr(model, "_lazy_contingency_callback", None)
+    model.optimize(_lazy_cb)
 
     try:
         save_solution_as_json(sc, model, instance_name=instance_name)

@@ -1,0 +1,22 @@
+\begin{table}[t]\centering
+\caption{Results on \texttt{case1354pegase} (1354 buses, 1991 lines, 1288 contingencies,
+  36 time steps, 600\,s limit).
+  Status: OPT\,=\,optimal within gap; TL\,=\,time limit.
+  N-1 feasibility: \checkmark\,=\,OK; \texttimes\,=\,violations detected; ---\,=\,no solution found.
+  Objective values shown only for N-1-feasible or non-violating solutions.}
+\label{tab:case1354}
+\small
+\begin{tabular}{lllrrl}
+\hline
+\textbf{Mode} & \textbf{Status} & \textbf{Time [s]} & \textbf{Gap} & \textbf{Obj.} & \textbf{N-1} \\
+\hline
+        \texttt{WARM} & TL & 602 & --- & --- & --- \\
+        \texttt{LAZY-All} ($K{=}0$) & TL & 607 & 12.3\% & $174.80$M & \checkmark \\
+        \texttt{LAZY-K64} & OPT & 247 & 4.6\% & $108.32$M & \texttimes \\
+        \texttt{LAZY-K128} & TL & 600 & --- & --- & --- \\
+        \texttt{LAZY-BANDIT} & OPT & 266 & 5.0\% & $108.92$M & \texttimes \\
+        \texttt{LAZY+COMMIT} & TL & 601 & 8.2\% & $166.95$M & \checkmark \\
+        \texttt{LAZY+GRU} & TL & 600 & 11.4\% & $172.77$M & \checkmark \\
+\hline
+\end{tabular}
+\end{table}
