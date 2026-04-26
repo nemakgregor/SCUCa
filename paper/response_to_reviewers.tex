@@ -2,16 +2,8 @@
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage[english]{babel}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{url}
-\usepackage{xcolor}
 \usepackage[margin=2.5cm]{geometry}
-\usepackage{hyperref}
-
-\newcommand{\rcom}[1]{\par\noindent\textbf{\textcolor{blue!60!black}{Reviewer comment:}} \emph{#1}\par}
-\newcommand{\rans}[1]{\par\noindent\textbf{\textcolor{green!40!black}{Response:}} #1\par\vspace{0.4em}}
-\newcommand{\where}[1]{\par\noindent\textbf{\textcolor{orange!70!black}{Where in manuscript:}} #1\par}
+\usepackage{url}
 
 \title{Response to Reviewers\\
 \large Manuscript: ``Learning-Enhanced Security-Constrained Unit Commitment Problem''}
@@ -21,90 +13,110 @@
 \begin{document}
 \maketitle
 
-We thank the reviewers for their careful reading and their detailed comments. In this revision we have (i) added bootstrap 95\% confidence intervals for the main speedup summaries, (ii) added a compact ablation of the GNN screener against the 1-NN baseline and classifier-level GNN precision/recall/F1 diagnostics, (iii) added fixed-$K$ lazy-cut ablations for BANDIT, (iv) added a representative \texttt{grbtune} sanity check, (v) added a quantitative comparison to prior ML-accelerated SCUC results in the Introduction, (vi) added a dedicated \emph{Limitations and threats to validity} subsection, (vii) made the post-contingency and base-case flow constraints symmetric in notation, and (viii) clarified why GNN/GRU/BANDIT are reported as negative or marginal results. To keep the manuscript within the page limit, the largest full per-mode tables are now represented in the main paper by compact summary tables and heatmaps, with detailed CSV tables released as paper artifacts.
+Thank you for the careful and useful reviews. We revised the paper to make the scope more modest and clearer. The paper is now presented as a comparison of acceleration approaches for DC-SCUC, not as a new SCUC formulation or a new ML solver. We also clarified the feasibility audit, shortened the manuscript, removed the duplicate figure, and kept the new evidence in the main text.
 
-Below we answer each comment explicitly, in the order of the review reports. Section / equation references are to the revised manuscript.
+\section*{Response to Reviewer 1}
 
-\section*{Reviewer 1}
+\textbf{Comment 1. Constraint reduction methodology is unclear; show initial and reduced constraint numbers.}
 
-\rcom{R1-C1. The overall methodology of constraint reduction is not very clear. Show initial and reduced numbers of constraints.}
-\rans{The revised PRUNE-$\tau$ subsection now gives the complete screening rule, including the 1-NN load feature vector, predicted injections, the emergency-margin score $s^m_\ell$, and the pruning rule $s^m_\ell\ge\tau$. The experiments section now visualizes the relationship between retained post-contingency constraints and speedup in Fig.~\ref{fig:constraint_reduction_speedup}. The supporting CSV reports the initial and retained constraint counts; for WARM+PRUNE-0.10 the reduction exceeds $99.7\%$ on the three largest systems.}
-\where{Sec.~3, ``Constraint Screening (PRUNE-$\tau$)''; Sec.~\ref{sec:experiments}, Fig.~\ref{fig:constraint_reduction_speedup}; supporting CSV in \texttt{paper/data/constraint\_reduction.csv}.}
+We expanded the PRUNE and LAZY descriptions. The paper now explains that PRUNE removes constraints before optimization and must be checked by a full post-solve N-1 audit, while LAZY adds violated contingency constraints during callbacks. We also added a compact constraint-reduction table in the main Results section. It reports rows relative to RAW, explicit N-1 constraints removed, and lazy cuts added.
 
-\rcom{R1-C2. The ``10x speedups'' claim in the abstract is questionable.}
-\rans{The abstract no longer claims a generic $10\times$ speedup. It now reads ``up to $25.8\times$ on \texttt{case89pegase} and $9.6\times$ on average across the six benchmark cases'', matching the compact main-results table and heatmap.}
-\where{Abstract, first paragraph.}
+\textbf{Comment 2. The abstract claim of 10x speedup is questionable.}
 
-\rcom{R1-C3. No quantitative comparison with prior ML-SCUC work [10]--[13].}
-\rans{We added a quantitative paragraph in the Introduction. It reports the $4.3\times$ headline number from Xavier \textit{et al.}~\cite{Xavier2019} on a 6515-bus system and the $2$--$10\times$ range of Jim\'enez-Cordero \textit{et al.}~\cite{JimenezCordero2022}, and explains that our best numbers are in the same order of magnitude but obtained from a strictly simpler pipeline that preserves exact N-1 feasibility by construction. A full head-to-head reproduction is out of scope for a benchmark-style paper, but the context is now explicit.}
-\where{Introduction, paragraph starting ``Machine learning has been used to predict commitment schedules\ldots''.}
+We changed the abstract. It now states the measured values more precisely: up to 25.8x on case89pegase and 9.6x on average across the six benchmark cases. We no longer describe the result as a generic 10x speedup over baseline solvers.
 
-\rcom{R1-C4. The case57 ``77/23/0'' column suggests $23\%$ of instances are infeasible regardless of method.}
-\rans{We clarified this in the experiments section: the same 14 dates are reported infeasible by \emph{all} 23 tested modes, which points to structural infeasibility of those MATPOWER instances (insufficient reserve after the worst-case contingency) rather than to a screening or warm-start failure. These 14 dates are excluded from all speedup statistics, so they cannot bias the acceleration factors. The exact per-date audit is stored in \texttt{paper/data/case57\_audit.csv}.}
-\where{Sec.~\ref{sec:experiments}, paragraph on the robustness audit and case57 infeasibility.}
+\textbf{Comment 3. Prior ML-SCUC speedups are not discussed.}
 
-\rcom{R1-C5. GNN: missing details, no P/R/F1, and the classifier is no better than 1-NN. Please explain.}
-\rans{We added the missing GNN details: line-graph construction, line-node features, criticality threshold $y_{\mathrm{thr}}=0.70$, inference threshold $\theta=0.60$, and the GraphSAGE training setup. We also added classifier-level diagnostics: on \texttt{case300}, where positive held-out labels are present at a non-negligible rate, the retrained GNN reaches precision 0.83, recall 0.51 and F1 0.63; on smaller cases, positives are absent or extremely sparse, so these metrics are not well-defined. Downstream, the GNN/1-NN speedup ratios range from 0.987 to 1.035 across PRUNE thresholds, so we explicitly treat the GNN as an exploratory negative result rather than as a recommended default.}
-\where{Sec.~3, ``Constraint Screening (GNN)'' paragraph; Sec.~\ref{sec:experiments}, Tab.~\ref{tab:ablation_sanity}; supporting CSVs \texttt{paper/tables/gnn\_pr\_f1.csv} and \texttt{paper/tables/gnn\_vs\_1nn.csv}.}
+We added a comparison in the Introduction. The revised text discusses prior ML-based SCUC and warm-starting results, explains how their reported speedups relate to this study, and states that the goal here is a controlled empirical comparison of acceleration mechanisms.
 
-\rcom{R1-C6. BANDIT: missing formula, $\mathcal{K}$, $\varepsilon$; marginal gain over LAZY.}
-\rans{We now state explicitly that $\mathcal{K}=\{64,128,256\}$, the reward is $R_t=-N_t^{\mathrm{added}}$ (negative number of lazy cuts added), and $\varepsilon=0.1$. We also added fixed-$K$ ablations: static budgets can be fast on \texttt{case118}, but on \texttt{case300} all fixed-$K$ settings are slower than plain LAZY/BANDIT and pass the strict violation audit in only 66\% of runs. The text therefore presents BANDIT and fixed-$K$ cut budgeting as negative or marginal results rather than recommended techniques.}
-\where{Sec.~3, ``Lazy Enforcement (LAZY, BANDIT)''; Sec.~\ref{sec:experiments}, Tab.~\ref{tab:ablation_sanity}.}
+\textbf{Comment 4. The case57 infeasibility pattern needs explanation.}
 
-\rcom{R1-C7. GRU degrades speedup; explain why.}
-\rans{We added a two-sentence diagnosis. First, MSE-trained reserve fractions $\hat r_{g,t}$ do not preserve ramp or min-up/down relationships, so the resulting dispatch violates inter-temporal feasibility more often than a direct 1-NN copy of a fully solved historical dispatch and is overwritten by the repair heuristic. Second, on small cases the solver reaches root feasibility in milliseconds, so PyTorch inference overhead is no longer negligible relative to the total solve time. The GRU is explicitly reported as a secondary ablation, not as a recommended default.}
-\where{Sec.~3, ``Warm Starts (WARM, GRU)'' paragraph (revised).}
+The revised Results text explains that the same 14 case57 dates fail across all tested modes, so this is treated as structural infeasibility of those benchmark instances rather than a failure of a specific acceleration method. The dates are: 2017-08-14, 2017-08-25, 2017-08-28, 2017-08-29, 2017-08-31, 2017-09-05, 2017-09-18, 2017-09-23, 2017-10-06, 2017-11-09, 2017-11-17, 2017-12-14, 2017-12-20, and 2017-12-25. These dates are excluded from paired speedup statistics.
 
-\rcom{R1-C8. Cases up to 300 buses are too small; consider larger datasets.}
-\rans{We now state this limitation explicitly rather than over-claiming beyond the available benchmark. The revised paper keeps the experimental scope to the six MATPOWER cases up to \texttt{case300}; larger systems are listed as future work in the limitations section.}
-\where{Sec.~\ref{sec:limitations}, \emph{Scale} bullet.}
+\textbf{Comment 5. GNN details and negative result are missing.}
 
-\rcom{R1-C9. No statistical significance measures; no CI.}
-\rans{We computed bootstrap 95\% confidence intervals (10\,000 resamples) for every key mode and case, and paired Wilcoxon signed-rank tests against RAW. To keep the manuscript within the page limit, the full CI table is released as a paper artifact, while the main paper reports the headline CIs inline: PRUNE-0.10 on \texttt{case89pegase} is $25.83\times$ with 95\% CI $[24.40,27.26]$, and LAZY+BANDIT on \texttt{case300} is $17.38\times$ with 95\% CI $[15.39,19.39]$. The Wilcoxon results remain significant on every benchmark case ($p<10^{-7}$).}
-\where{Sec.~\ref{sec:experiments}; supporting CSVs \texttt{paper/data/speedup\_summary.csv} and \texttt{paper/data/wilcoxon.csv}.}
+We expanded the GNN subsection. It now gives the line-graph construction, node features, critical-line threshold, inference threshold, training setup, and case300 precision/recall/F1. The paper now treats the GNN as a negative ablation: it learns a plausible classifier, but does not improve downstream MILP runtime over the simpler 1-NN margin rule.
 
-\rcom{R1-C10. 70/15/15 without cross-validation.}
-\rans{Full $k$-fold cross-validation of the end-to-end solver pipeline is prohibitively expensive at the scale of 7\,702 solver runs: every fold would require re-solving roughly $1\,100$ MILPs (several tens of hours of compute). We therefore added this as an explicit limitation in the \emph{Limitations and threats to validity} subsection (Sec.~\ref{sec:limitations}), alongside the remark that the reported Wilcoxon tests concern per-instance differences (not split-level stability). We also state that the random seed of the 70/15/15 split is fixed and that all split indices will be released together with the code.}
-\where{Sec.~\ref{sec:limitations}.}
+\textbf{Comment 6. BANDIT reward, candidate set, and epsilon are missing; gain is marginal.}
 
-\rcom{R1-C11. No code/data repository.}
-\rans{A public release of all ML training pipelines, solver wrappers, and post-processing scripts (together with the benchmark instances and raw per-instance runtime logs) is now announced in the \emph{Reproducibility} paragraph at the end of Sec.~\ref{sec:experiments}: \url{https://github.com/nemakgregor/SCUCa}.}
-\where{Sec.~\ref{sec:experiments}, \emph{Reproducibility} paragraph.}
+We added the exact candidate set $K\in\{64,128,256\}$, the reward $R_t=-N_t^{\mathrm{added}}$, and the $\varepsilon$-greedy policy with $\varepsilon=0.1$. The Results section now states that BANDIT adds fewer cuts but gives only marginal improvement over plain LAZY, so it is reported mainly as a negative result on adaptive cut-budgeting.
 
-\rcom{R1-C12. The conclusion claim is too strong.}
-\rans{The opening sentence of the Conclusion now reads ``This study demonstrates that, among the methods considered in this work, the most effective way to accelerate a raw MILP formulation of SCUC is to reduce or delay post-contingency constraints\ldots''. The qualifier was present in the previous revision; we kept it and applied the same restraint to the abstract.}
-\where{Conclusion, first sentence; Abstract.}
+\textbf{Comment 7. GRU warm starts degrade speedup and need explanation.}
 
-\subsection*{Editorial / typography (R1 typ-1\ldots typ-7)}
-\begin{itemize}
-\item typ-1 (Tab.~1 position / size): the oversized all-mode table was removed from the main manuscript and replaced by compact summary tables and released CSV artifacts.
-\item typ-2 (duplicate ``This is achieved by setting\ldots''): removed in the HINTS paragraph.
-\item typ-3 (Tab.~4 vs Tab.~3 labeling): the labels are now consistent.
-\item typ-4 (``These issues'' $\to$ ``These observations''): fixed.
-\item typ-5 (double period ``guarantees..''): fixed.
-\item typ-6 (missing quotation marks in refs): fixed in \texttt{thebibliography}.
-\item typ-7 (duplicate DOI in [13]): fixed.
-\end{itemize}
+We added an explanation in the Warm Starts subsection. The GRU predicts MSE-trained dispatch fractions, which do not preserve ramping and minimum up/down relationships as well as copying a solved 1-NN dispatch. On small cases, PyTorch inference overhead is also not negligible relative to total solve time. We therefore report GRU as a secondary ablation rather than as a recommended default.
 
-\section*{Reviewer 2}
+\textbf{Comment 8. The main test cases are small and larger data should be considered.}
 
-\rcom{R2-C1. In (12), (15), (21) the right-hand side should be $-F^{\mathrm{N}}$ / $-F^{\mathrm{E}}$.}
-\rans{We rewrote the base-case and post-contingency flow bounds in symmetric two-sided form (Eqs.~\eqref{eq:base-lims}, \eqref{eq:cont-line}, \eqref{eq:cont-gen}). The lower bound $-F^{\mathrm{N}}-\underline{o}$ / $-F^{\mathrm{E}}-\underline{c}$ is now explicit; the pair of linear inequalities actually passed to the solver is stated as an equivalent form immediately after. This should match the form the reviewer expected.}
-\where{Sec.~2, Eqs.~\eqref{eq:base-lims}, \eqref{eq:cont-line}, \eqref{eq:cont-gen}.}
+We added a limitation in the Results section. Case14 and case30 are now described as correctness and scaling sanity checks, not as practically meaningful speedup evidence. The practical claims are based mainly on case89pegase, case118, case300, and the case1354pegase stress test.
 
-\rcom{R2-C2. Two loads that differ only by an additive constant have $d(i)=0$ under pure z-scoring.}
-\rans{The feature vector used by PRUNE-$\tau$ and by the WARM warm-start was augmented with level-sensitive summary statistics: $\phi=[z_0,\dots,z_{T-1},\mu_L,\max_t L_t,\sum_t L_t,\sigma_L]$. Two load trajectories that differ by a uniform shift now have a strictly positive distance through the $\mu_L$, $\max_t L_t$ and $\sum_t L_t$ components. The paper explicitly describes this as avoiding the degeneracy the reviewer identified.}
-\where{Sec.~3, ``Constraint Screening (PRUNE-$\tau$)'' paragraph, Eq.~(20).}
+\textbf{Comment 9. Statistical significance measures are missing.}
 
-\rcom{R2-C3. Could the gain be reduced to common MIP knowledge? The solver output is not discussed. Why not make (12) lazy too?}
-\rans{We added an explicit paragraph in ``Lazy Enforcement (LAZY, BANDIT)'' stating why we apply lazy enforcement only to the post-contingency constraints~\eqref{eq:cont-line}--\eqref{eq:cont-gen}: they are by far the most numerous, and their threshold-style slack penalties in the objective weaken the dual bound, so pushing them out of the root LP is exactly the kind of ``threshold-reduction'' mechanism the reviewer identified. We also state that a preliminary experiment that additionally made the base-case bounds~\eqref{eq:base-lims} lazy did not yield consistent improvement. In the experiments section we added a compact sanity table with grbtune and fixed-$K$ cut-budget results, which helps separate solver tuning effects from constraint-management effects.}
-\where{Sec.~3, ``Lazy Enforcement (LAZY, BANDIT)'' paragraph; Sec.~\ref{sec:experiments}, Tab.~\ref{tab:ablation_sanity}.}
+We added bootstrap 95\% confidence intervals for representative speedup summaries and paired Wilcoxon signed-rank tests against RAW. The full text reports that the main methods are significant on every benchmark case.
 
-\rcom{R2-C4. Gurobi has a built-in auto-tuning tool; information about its results is missing.}
-\rans{We added a representative \texttt{grbtune} sanity check. On \texttt{case118}, the tuned baseline was slightly slower than default (0.93x); on \texttt{case300}, it was only 1.02x faster. These results do not replace a full per-instance tuning benchmark, but they rule out the simplest explanation that the observed order-of-magnitude gains are obtainable from Gurobi parameter tuning alone on the representative larger cases.}
-\where{Sec.~\ref{sec:experiments}, Tab.~\ref{tab:ablation_sanity}; Sec.~\ref{sec:limitations}, \emph{Solver tuning} bullet.}
+\textbf{Comment 10. No cross-validation; seed sensitivity is possible.}
 
-\vspace{1em}
-\noindent We again thank the reviewers for comments that significantly sharpened the paper. We believe the revised manuscript now states its scope, evidence, and negative results accurately and defensibly.
+We added this as a limitation in the Results section. The learning components use one fixed 70/15/15 split, so learning effects should be interpreted as split-specific. Seed sensitivity is listed as future work.
+
+\textbf{Comment 11. No code or data repository.}
+
+The scripts, benchmark configuration files, run logs, generated tables, and plotting scripts are available from the author upon request.
+
+\textbf{Comment 12. The conclusion claim is too broad.}
+
+We narrowed the conclusion. It now says ``among the methods considered in this work'' and refers to audited feasibility for the tested benchmark instances, not to a universal guarantee for all SCUC models.
+
+\section*{Reviewer 1: Typos and Formatting}
+
+\textbf{Point 1. Move or reduce Table 1.}
+
+We reduced the robustness information in the main manuscript. The large repetitive table was replaced by a short textual description, and the case57 infeasibility pattern is explained in the Results text. The exact dates are listed in this response.
+
+\textbf{Point 2. Duplicate VarHintVal sentence.}
+
+We removed the duplicated sentence.
+
+\textbf{Point 3. Wrong table reference.}
+
+We checked and updated the references after the figure/table changes. The main result, confidence-interval, constraint-reduction, and case1354 tables are referenced in the text, and the case57 infeasibility pattern is now discussed directly in the Results section.
+
+\textbf{Point 4. ``These issues'' should be ``These techniques'' or ``These methods''.}
+
+We corrected this wording.
+
+\textbf{Point 5. Double period at the end of Section 5.}
+
+We removed the double period.
+
+\textbf{Point 6. Reference-title quotation marks are inconsistent.}
+
+We made the bibliography style consistent by using quotation marks for article titles.
+
+\textbf{Point 7. Duplicate tail in Reference 13.}
+
+We removed the duplicated DOI/date tail.
+
+\section*{Response to Reviewer 2}
+
+\textbf{Point 1. Formulas (12), (15), and (21) have wrong lower-bound signs.}
+
+We rewrote the base-case and post-contingency flow constraints in symmetric two-sided form. The lower bounds now use $-F^{\mathrm{N}}$ and $-F^{\mathrm{E}}$.
+
+\textbf{Point 2. The z-score distance makes uniformly shifted load profiles indistinguishable.}
+
+We changed the feature description. The 1-NN feature vector now combines the z-scored load series with level-sensitive statistics: mean load, maximum load, total load, and standard deviation. This removes the degeneracy caused by pure z-scoring.
+
+\textbf{Point 3. Explain whether the findings reduce to common MIP experience; discuss solver behavior and lazy constraints.}
+
+We added a solver-behavior discussion in the Results section. It explains that RAW and WARM expose the full explicit N-1 model at the root, while LAZY and PRUNE shrink the root relaxation to about 5\% of the RAW row count. The text also explains why warm starts mainly affect the primal side, whereas constraint management changes the root LP size, early gap behavior, and search burden.
+
+We also clarified why only post-contingency constraints are made lazy. They are by far the most numerous constraints and their slack-penalty structure weakens the dual bound. Base-case limits are kept in the root LP because they are comparatively few. A preliminary experiment with lazy base-case limits did not give consistent improvement.
+
+\textbf{Point 4. Include information about Gurobi auto-tuning.}
+
+We added a representative \texttt{grbtune} sanity check. The tuned parameter set did not explain the order-of-magnitude speedups from constraint management: it gave about 0.93x on a representative case118 instance and 1.02x on case300.
+
+\section*{Final Note}
+
+The revised manuscript is shorter and more conservative. It now emphasizes that the main contribution is an empirical comparison of strong acceleration families for DC-SCUC. It also reports negative and marginal findings plainly: GNN does not improve over the 1-NN screener, GRU is not a recommended default on the tested small and medium cases, and BANDIT gives little improvement over plain LAZY.
 
 \end{document}
