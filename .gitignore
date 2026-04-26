@@ -37,3 +37,9 @@ run.txt
 
 logs/*
 
+# macOS
+.DS_Store
+
+# Large optimization artifacts (do not commit)
+*.mps
+
