@@ -513,6 +513,8 @@ def verify_solution(
 
                 bidx = gen.bus.index
                 if bidx == ref_1b or bidx not in col_by_bus_1b:
+                    v = np.maximum(f_val - F_em - covp_val, -f_val - F_em - covn_val)
+                    worst_gen_cont = max(worst_gen_cont, np.max(v))
                     continue
 
                 col = isf_csc.getcol(col_by_bus_1b[bidx])

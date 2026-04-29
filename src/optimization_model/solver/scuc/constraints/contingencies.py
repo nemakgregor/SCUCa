@@ -146,11 +146,7 @@ def add_constraints(
     n_conts_used_gen = 0
     n_skipped_line = 0
     n_skipped_gen = 0
-    n_skipped_gen_zero = 0
-
-    allowed_lines_count = (
-        len(monitored_line_whitelist) if monitored_line_whitelist else len(lines)
-    )
+    n_zero_coeff_gen = 0
 
     for cont in contingencies:
         if cont.lines:
@@ -211,7 +207,42 @@ def add_constraints(
             for gen in cont.units:
                 bus_1b = gen.bus.index
                 if bus_1b == ref_1b or bus_1b not in col_by_bus_1b:
-                    n_skipped_gen_zero += 2 * allowed_lines_count * len(T_list)
+                    # The ISF column is absent for the reference bus, so the
+                    # generator outage leaves monitored line flows unchanged.
+                    coeff = 0.0
+                    for line_l in lines:
+                        if not _mon_allowed(line_l.name):
+                            n_skipped_gen += 2 * len(T_list)
+                            continue
+                        if keep_gen_pairs and (line_l.name, gen.name) not in keep_gen_pairs:
+                            n_skipped_gen += 2 * len(T_list)
+                            continue
+
+                        kept_ts = list(_kept_ts_gen(line_l, gen, coeff))
+                        if not kept_ts:
+                            continue
+
+                        model.addConstrs(
+                            (
+                                line_flow[line_l.name, t]
+                                <= float(line_l.emergency_limit[t])
+                                + cont_over_pos[line_l.name, t]
+                                for t in kept_ts
+                            )
+                        )
+                        model.addConstrs(
+                            (
+                                -line_flow[line_l.name, t]
+                                <= float(line_l.emergency_limit[t])
+                                + cont_over_neg[line_l.name, t]
+                                for t in kept_ts
+                            )
+                        )
+                        added = 2 * len(kept_ts)
+                        _incr_pair_gen(line_l.name, gen.name, added)
+                        explicit_total += added
+                        n_cons_gen += added
+                        n_zero_coeff_gen += added
                     continue
 
                 col = isf_csc.getcol(col_by_bus_1b[bus_1b])
@@ -287,14 +318,14 @@ def add_constraints(
         pass
 
     logger.info(
-        "Cons(C-120/C-121): line-out=%d (conts_used=%d, skipped=%d), gen-out=%d (conts_used=%d, skipped=%d, skipped_gen_zero=%d); lines=%d, T=%d",
+        "Cons(C-120/C-121): line-out=%d (conts_used=%d, skipped=%d), gen-out=%d (conts_used=%d, skipped=%d, zero_coeff=%d); lines=%d, T=%d",
         n_cons_line,
         n_conts_used_line,
         n_skipped_line,
         n_cons_gen,
         n_conts_used_gen,
         n_skipped_gen,
-        n_skipped_gen_zero,
+        n_zero_coeff_gen,
         len(lines),
         len(time_periods),
     )
