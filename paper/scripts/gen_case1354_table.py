@@ -30,13 +30,13 @@ MODE_ORDER = [
 ]
 
 MODE_LABELS = {
-    "WARM":              r"\texttt{WARM}",
-    "WARM+LAZY":         r"\texttt{LAZY-All} ($K{=}0$)",
-    "WARM+LAZY+K64":     r"\texttt{LAZY-K64}",
-    "WARM+LAZY+K128":    r"\texttt{LAZY-K128}",
-    "WARM+LAZY+BANDIT":  r"\texttt{LAZY-BANDIT}",
-    "WARM+LAZY+COMMIT":  r"\texttt{LAZY+COMMIT}",
-    "WARM+LAZY+GRU":     r"\texttt{LAZY+GRU}",
+    "WARM":              r"WARM",
+    "WARM+LAZY":         r"LAZY-All ($K{=}0$)",
+    "WARM+LAZY+K64":     r"LAZY-K64",
+    "WARM+LAZY+K128":    r"LAZY-K128",
+    "WARM+LAZY+BANDIT":  r"LAZY-BANDIT",
+    "WARM+LAZY+COMMIT":  r"LAZY+COMMIT",
+    "WARM+LAZY+GRU":     r"LAZY+GRU",
 }
 
 MODE_LABELS_SHORT = {
@@ -118,11 +118,7 @@ def gen_latex(df: pd.DataFrame) -> Path:
 
     body = "\n".join(rows)
     tex = rf"""\begin{{table}}[t]\centering
-\caption{{Results on \texttt{{case1354pegase}} (1354 buses, 1991 lines, 1288 contingencies,
-  36 time steps, 600\,s limit).
-  Status: OPT\,=\,optimal within gap; TL\,=\,time limit.
-  N-1 feasibility: \checkmark\,=\,OK; \texttimes\,=\,violations detected; ---\,=\,no solution found.
-  Objective values shown only for N-1-feasible or non-violating solutions.}}
+\caption{{case1354pegase stress-test results.}}
 \label{{tab:case1354}}
 \small
 \begin{{tabular}}{{lllrrl}}
@@ -197,7 +193,7 @@ def gen_figure(df: pd.DataFrame) -> Path:
     ax.set_ylim(0, 700)
     ax.axhline(600, color="#888888", linestyle="--", linewidth=0.8, label="600 s limit")
     ax.set_title(
-        r"\texttt{case1354pegase} — runtime and N-1 feasibility (600\,s limit)",
+        r"case1354pegase — runtime and N-1 feasibility (600\,s limit)",
         fontsize=10
     )
 

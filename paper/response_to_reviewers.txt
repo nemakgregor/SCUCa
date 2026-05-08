@@ -1,0 +1,25 @@
+We thank the reviewer for the careful reading and constructive comments. The comments helped us improve the clarity of the revised manuscript. They also helped us find places where the reported numbers needed an additional consistency check.
+
+1. Comment: In Eq. 18, the feature vector phi includes both mu_L and sum_t L_t. Since T is fixed, sum_t L_t = T mu_L, so one feature is redundant.
+
+Response: The time horizon is fixed. Therefore, total load is proportional to mean load and is redundant as an independent feature. In the experiments, we kept this term because it was part of the implemented nearest-neighbor descriptor. It gives extra weight to the average load level. We clarified this point in the text. We also explained that max_t L_t captures the peak load level.
+
+We do not expect this redundancy to change the main conclusions. It does not affect the SCUC formulation, the security constraints, or the final N-1 feasibility audit. It may slightly change the nearest-neighbor choice for some instances. It may therefore slightly change the exact speedup numbers. Removing this feature cleanly would require rerunning the experiments. We leave this ablation for future work.
+
+2. Comment: The text reports "totaling 327 hours" for over 8000 solver runs. The number 327 matches the instance count and appears to be a copy-paste error.
+
+Response: The value 327 hours was a copy-paste error. We corrected the text. In the revised experiments, we used a smaller held-out set of test days. We did not use all 365 days for every case. At the same time, we evaluated more solver modes and ablations. The test campaign contains 8,845 completed solver runs over 360 test instances. It totals 150.0 wall-clock hours (94.3 solver-runtime hours). We also report the training and preparation effort separately. This stage contains 434 solver runs over 288 training instances. It adds 62.8 wall-clock hours (51.9 solver-runtime hours).
+
+3. Comment: The case1354pegase stress test covers a single instance. It shows that the lazy callback design runs on a larger grid, but one data point does not show robustness or generalization at this scale.
+
+Response: We revised the text to state this more carefully. The case1354pegase experiment is a feasibility stress test. It checks whether the callback design can run on a much larger grid. It is not presented as evidence of robustness or generalization at this scale. Table 4 reports one representative held-out instance to keep the presentation compact.
+
+The larger case1354pegase campaign was not limited to one day. We also solved 24 training days and used two held-out test days. This produced 74 training/preparation runs and 66 test-mode runs. These runs were used to build and check the large-case pipeline. We now state this in the paper.
+
+We are also continuing experiments on larger cases. These runs require substantially more computation, so they are outside the present revision. We plan to report them in a subsequent publication.
+
+4. Comment: The Introduction section is shortened now, but in some sense the original introduction was better.
+
+Response: We restored the original introduction structure. It gives better context for the SCUC formulation, DC power-flow modeling, contingency constraints, and related ML-based acceleration work.
+
+We also used this revision pass to run an additional consistency check. We corrected the reported best average speedup. We updated the median solver-runtime values. We clarified that the main benchmark uses 24 periods, while the case1354pegase stress test uses 36 periods. We also softened the N-1 feasibility statement. The revised text now states that feasibility is claimed after the full post-solve audit.

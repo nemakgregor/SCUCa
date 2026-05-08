@@ -7,7 +7,7 @@
 #   3. LAZY-K128  : WARM+LAZY, add_top_k=128 (top-K lazy)
 #   4. COMMIT     : WARM+LAZY K=0 + 1NN commit hints
 #   5. BANDIT     : WARM+LAZY, adaptive K in {64,128,256}
-#   6. WARM       : WARM only (no N-1), reference point
+#   6. WARM       : warm-start reference run
 #   7. GRU        : WARM+LAZY K=0 + GRU dispatch warm start
 #
 # Note on violations: for case1354, Gurobi's post-termination LP re-solve
@@ -64,7 +64,7 @@ echo "=== [5/7] BANDIT    (adaptive top-k in {64,128,256}) ==="
     --modes WARM+LAZY --adv-adaptive-topk \
     --adv-topk-candidates 64 128 256
 
-echo "=== [6/7] WARM      (no N-1, reference point) ==="
+echo "=== [6/7] WARM      (warm-start reference run) ==="
 "$PYTHON_BIN" -m src.paper.experiments "${BASE[@]}" \
     --modes WARM
 

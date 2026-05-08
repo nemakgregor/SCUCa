@@ -177,8 +177,7 @@ def render_speedup_ci_latex(wide: pd.DataFrame) -> str:
     cases = list(wide.columns)
     header = (
         "\\begin{sidewaystable*}\\centering\n"
-        "\\caption{Speed-up factors with bootstrap 95\\% confidence intervals "
-        "(mean [CI\\textsubscript{lo}, CI\\textsubscript{hi}]).}\n"
+        "\\caption{Speedups with bootstrap confidence intervals.}\n"
         "\\label{tab:speedup_ci}\n"
         "\\renewcommand{\\arraystretch}{1.2}\n"
         "\\footnotesize\n"
@@ -213,8 +212,8 @@ def main_results_summary() -> pd.DataFrame:
         "WARM+LAZY+BANDIT": "Adaptive lazy cut budget",
         "WARM+LAZY+COMMIT": "Lazy with commitment guidance",
         "WARM+LAZY+GRU": "Lazy with GRU warm start",
-        "WARM+PRUNE-0.10": "Conservative screening",
-        "WARM+PRUNE-0.10+GNN": "Conservative screening + GNN",
+        "WARM+PRUNE-0.10": "Recommended screening",
+        "WARM+PRUNE-0.10+GNN": "Recommended screening + GNN",
         "WARM+PRUNE-0.20": "Screening ablation",
         "WARM+PRUNE-0.20+GNN": "Screening + GNN ablation",
         "WARM+PRUNE-0.30": "Screening ablation",
@@ -262,15 +261,14 @@ def main_results_summary() -> pd.DataFrame:
 def render_main_results_summary_latex(df: pd.DataFrame) -> str:
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Summary over the common comparison mode set. "
-        "Mean speed-up is averaged over the cases where the mode was evaluated; "
-        "fixed-$K$ and \\texttt{grbtune} rows are reviewer-added sanity checks "
-        "with fewer available cases.}\n"
+        "\\caption{Main speedup summary.}\n"
         "\\label{tab:main_results}\n"
-        "\\small\n"
-        "\\begin{tabularx}{\\linewidth}{lrrrrX}\n\\hline\n"
-        "\\textbf{Mode} & \\textbf{Mean} & \\textbf{Best case} & "
-        "\\textbf{Opt.} & \\textbf{Cases} & \\textbf{Interpretation} \\\\\n\\hline\n"
+        "\\scriptsize\n"
+        "\\setlength{\\tabcolsep}{2pt}\n"
+        "\\resizebox{\\linewidth}{!}{%\n"
+        "\\begin{tabularx}{\\linewidth}{|l|r|r|r|r|X|}\n\\hline\n"
+        "\\textbf{Mode} & \\textbf{Mean} & \\textbf{Best mean} & "
+        "\\textbf{Opt. status} & \\textbf{Cases} & \\textbf{Interpretation} \\\\\n\\hline\n"
     )
     rows = []
     for _, r in df.iterrows():
@@ -282,14 +280,14 @@ def render_main_results_summary_latex(df: pd.DataFrame) -> str:
         )
         opt = "--" if pd.isna(r["opt_rate_mean"]) else f"{r['opt_rate_mean']*100:.0f}\\%"
         rows.append(
-            f"\\texttt{{{r['mode']}}} & "
+            f"{r['mode']} & "
             f"{mean} & "
             f"{best} & "
             f"{opt} & "
             f"{int(r['n_cases'])} & "
             f"{r['interpretation']} \\\\"
         )
-    tex = header + "\n".join(rows) + "\n\\hline\n\\end{tabularx}\n\\end{table}\n"
+    tex = header + "\n".join(rows) + "\n\\hline\n\\end{tabularx}\n}\n\\end{table}\n"
     (TABLES / "main_results_summary.tex").write_text(tex, encoding="utf-8")
     return tex
 
@@ -536,16 +534,15 @@ def constraint_management_summary() -> pd.DataFrame:
 def render_constraint_management_latex(df: pd.DataFrame) -> str:
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Constraint management over the common comparison mode set. "
-        "Final constraints are reported relative to RAW; explicit removal applies "
-        "to PRUNE modes; lazy-added constraints are callback additions observed in "
-        "the reviewer ablations where available.}\n"
+        "\\caption{Constraint-management summary.}\n"
         "\\label{tab:constraint_management}\n"
-        "\\footnotesize\n"
-        "\\begin{tabular}{lrrrrr}\n\\hline\n"
+        "\\scriptsize\n"
+        "\\setlength{\\tabcolsep}{2pt}\n"
+        "\\resizebox{\\linewidth}{!}{%\n"
+        "\\begin{tabular}{|l|r|r|r|r|r|}\n\\hline\n"
         "\\textbf{Mode} & \\textbf{Cases} & \\textbf{Speed-up} & "
-        "\\textbf{Final constr.} & \\textbf{Explicit removed} & "
-        "\\textbf{Lazy added} \\\\\n\\hline\n"
+        "\\textbf{Root rows} & \\textbf{N-1 pruned} & "
+        "\\textbf{Lazy cuts} \\\\\n\\hline\n"
     )
     rows = []
     for _, r in df.iterrows():
@@ -555,14 +552,14 @@ def render_constraint_management_latex(df: pd.DataFrame) -> str:
         removed = "--" if pd.isna(r["explicit_removed_pct"]) else f"{r['explicit_removed_pct']*100:.2f}\\%"
         lazy = "--" if pd.isna(r["lazy_added_mean"]) else f"{r['lazy_added_mean']:,.0f}"
         rows.append(
-            f"\\texttt{{{r['mode']}}} & "
+            f"{r['mode']} & "
             f"{cases} & "
             f"{speed} & "
             f"{final} & "
             f"{removed} & "
             f"{lazy} \\\\"
         )
-    tex = header + "\n".join(rows) + "\n\\hline\n\\end{tabular}\n\\end{table}\n"
+    tex = header + "\n".join(rows) + "\n\\hline\n\\end{tabular}\n}\n\\end{table}\n"
     (TABLES / "constraint_management_summary.tex").write_text(tex, encoding="utf-8")
     return tex
 
@@ -684,12 +681,10 @@ def render_gnn_vs_1nn_latex(df: pd.DataFrame) -> str:
 
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Ablation of the GraphSAGE screener against the 1-NN baseline. "
-        "Values are means across the six benchmark cases. "
-        "``Kept ratio'' is the fraction of post-contingency constraints retained after screening.}\n"
+        "\\caption{GNN screener ablation.}\n"
         "\\label{tab:gnn_ablation}\n"
         "\\small\n"
-        "\\begin{tabular}{lcccc}\n\\hline\n"
+        "\\begin{tabular}{|l|c|c|c|c|}\n\\hline\n"
         "\\textbf{Threshold} & "
         "\\textbf{Speedup (1-NN)} & "
         "\\textbf{Speedup (GNN)} & "
@@ -744,7 +739,7 @@ def ablation_sanity_table(gnn: pd.DataFrame) -> pd.DataFrame:
             "conclusion": "aggressive cut budgets are not robust",
         },
         {
-            "check": "\\texttt{grbtune}",
+            "check": "grbtune",
             "evidence": f"case14 {grb14:.2f}x; case118 {grb118:.2f}x; case300 {grb300:.2f}x",
             "conclusion": "does not explain order-of-magnitude gains",
         },
@@ -757,8 +752,7 @@ def ablation_sanity_table(gnn: pd.DataFrame) -> pd.DataFrame:
 def render_ablation_sanity_latex(df: pd.DataFrame) -> str:
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Compact reviewer-facing ablations and sanity checks. "
-        "The detailed CSV summaries are released with the paper artifacts.}\n"
+        "\\caption{Ablation and sanity-check summary.}\n"
         "\\label{tab:ablation_sanity}\n"
         "\\small\n"
         "\\begin{tabularx}{\\linewidth}{lXX}\n\\hline\n"
@@ -805,18 +799,19 @@ def render_large_case_latex(df: pd.DataFrame) -> str:
     df = df[df["mode_id"].isin(keep_modes)].copy()
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Auxiliary runtime sanity check on \\texttt{case300} for "
-        "lazy and warm-lazy variants.}\n"
+        "\\caption{case300 lazy-runtime sanity check.}\n"
         "\\label{tab:large_case}\n"
-        "\\small\n"
-        "\\begin{tabular}{lrrrrrr}\n\\hline\n"
+        "\\scriptsize\n"
+        "\\setlength{\\tabcolsep}{2pt}\n"
+        "\\resizebox{\\linewidth}{!}{%\n"
+        "\\begin{tabular}{|l|r|r|r|r|r|r|}\n\\hline\n"
         "\\textbf{Mode} & "
         "\\textbf{n} & "
-        "\\textbf{Opt.\\ rate} & "
-        "\\textbf{TL rate} & "
-        "\\textbf{Median [s]} & "
-        "\\textbf{Root constr.} & "
-        "\\textbf{Lazy added} \\\\\n\\hline\n"
+        "\\textbf{Opt. status} & "
+        "\\textbf{TL} & "
+        "\\textbf{Med. [s]} & "
+        "\\textbf{Root rows} & "
+        "\\textbf{Lazy cuts} \\\\\n\\hline\n"
     )
     rows = []
     for _, r in df.iterrows():
@@ -832,7 +827,7 @@ def render_large_case_latex(df: pd.DataFrame) -> str:
             f"{r['lazy_added_mean']:,.0f}" if pd.notna(r["lazy_added_mean"]) else "--"
         )
         rows.append(
-            f"\\texttt{{{r['mode_id']}}} & "
+            f"{str(r['mode_id']).replace('_', '-')} & "
             f"{int(r['n'])} & "
             f"{r['opt_rate']*100:.0f}\\% & "
             f"{r['time_limit_rate']*100:.0f}\\% & "
@@ -841,7 +836,7 @@ def render_large_case_latex(df: pd.DataFrame) -> str:
             f"{lazy} \\\\"
         )
     body = "\n".join(rows)
-    footer = "\n\\hline\n\\end{tabular}\n\\end{table}\n"
+    footer = "\n\\hline\n\\end{tabular}\n}\n\\end{table}\n"
     tex = header + body + footer
     (TABLES / "large_case.tex").write_text(tex, encoding="utf-8")
     return tex
@@ -861,12 +856,10 @@ def grbtune_table() -> pd.DataFrame:
 def render_grbtune_latex(df: pd.DataFrame) -> str:
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Gurobi parameter tuning sanity check on representative "
-        "instances. The speed-up is the default runtime divided by the tuned "
-        "runtime; values below one indicate a slower tuned run.}\n"
+        "\\caption{Gurobi tuning sanity check.}\n"
         "\\label{tab:grbtune}\n"
         "\\small\n"
-        "\\begin{tabular}{lrrrr}\n\\hline\n"
+        "\\begin{tabular}{|l|r|r|r|r|}\n\\hline\n"
         "\\textbf{Case} & "
         "\\textbf{Default [s]} & "
         "\\textbf{Tuned [s]} & "
@@ -941,12 +934,10 @@ def lazy_topk_table() -> pd.DataFrame:
 def render_lazy_topk_latex(df: pd.DataFrame) -> str:
     header = (
         "\\begin{table}[t]\\centering\n"
-        "\\caption{Fixed-$K$ ablation for lazy post-contingency cut generation. "
-        "The fixed-$K$ rows use $K\\in\\{64,128,256\\}$; feasibility is the "
-        "share of runs whose post-solve violation audit returned OK.}\n"
+        "\\caption{Fixed-$K$ lazy-cut ablation.}\n"
         "\\label{tab:lazy_topk}\n"
         "\\small\n"
-        "\\begin{tabular}{llrrrr}\n\\hline\n"
+        "\\begin{tabular}{|l|l|r|r|r|r|}\n\\hline\n"
         "\\textbf{Case} & "
         "\\textbf{Variant} & "
         "\\textbf{n} & "
@@ -958,7 +949,7 @@ def render_lazy_topk_latex(df: pd.DataFrame) -> str:
     for _, r in df.iterrows():
         rows.append(
             f"{r['case_short']} & "
-            f"\\texttt{{{r['variant']}}} & "
+            f"{r['variant']} & "
             f"{int(r['n'])} & "
             f"{r['runtime_median_sec']:.2f} & "
             f"{r['median_speedup']:.2f}x & "

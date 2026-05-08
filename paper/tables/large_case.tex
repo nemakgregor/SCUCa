@@ -1,15 +1,18 @@
 \begin{table}[t]\centering
-\caption{Auxiliary runtime sanity check on \texttt{case300} for lazy and warm-lazy variants.}
+\caption{case300 lazy-runtime sanity check.}
 \label{tab:large_case}
-\small
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{|l|r|r|r|r|r|r|}
 \hline
-\textbf{Mode} & \textbf{n} & \textbf{Opt.\ rate} & \textbf{TL rate} & \textbf{Median [s]} & \textbf{Root constr.} & \textbf{Lazy added} \\
+\textbf{Mode} & \textbf{n} & \textbf{Opt. status} & \textbf{TL} & \textbf{Med. [s]} & \textbf{Root rows} & \textbf{Lazy cuts} \\
 \hline
-\texttt{WARM_LAZY} & 6 & 100\% & 0\% & 23 & 71,784 & 7,906 \\
-\texttt{SHRINK_LAZY} & 6 & 100\% & 0\% & 27 & 15,959 & 0 \\
-\texttt{LAZY_ALL} & 6 & 100\% & 0\% & 27 & 71,784 & 8,264 \\
-\texttt{WARM_SR_LAZY} & 6 & 100\% & 0\% & 433 & 3,385,032 & 2,212 \\
+WARM-LAZY & 6 & 100\% & 0\% & 23 & 71,784 & 7,906 \\
+SHRINK-LAZY & 6 & 100\% & 0\% & 27 & 15,959 & 0 \\
+LAZY-ALL & 6 & 100\% & 0\% & 27 & 71,784 & 8,264 \\
+WARM-SR-LAZY & 6 & 100\% & 0\% & 433 & 3,385,032 & 2,212 \\
 \hline
 \end{tabular}
+}
 \end{table}

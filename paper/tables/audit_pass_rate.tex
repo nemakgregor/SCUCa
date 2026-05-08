@@ -1,0 +1,19 @@
+\begin{table}[t]\centering
+\caption{Status and audit pass rates. TL is time limit; no inc. means no incumbent; audit OK is audited N-1 feasible.}
+\label{tab:audit_pass_rate}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{|l|r|r|r|r|r|}
+\hline
+\textbf{Mode} & \textbf{Opt.} & \textbf{TL} & \textbf{No inc.} & \textbf{Audit fail} & \textbf{Audit OK} \\
+\hline
+RAW & 91\% & 5\% & 4\% & 0\% & 91\% \\
+WARM+LAZY & 96\% & 0\% & 4\% & 0\% & 96\% \\
+WARM+LAZY+BANDIT & 96\% & 0\% & 4\% & 0\% & 96\% \\
+WARM+PRUNE-0.10 & 96\% & 0\% & 4\% & 0\% & 96\% \\
+WARM+LAZY+K128 & 96\% & 0\% & 4\% & 23\% & 73\% \\
+\hline
+\end{tabular}
+}
+\end{table}
