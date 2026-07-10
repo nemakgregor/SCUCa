@@ -1,0 +1,7 @@
+case_folder,p_runtime,HL_runtime_delta,RBC_runtime,p_nodes,HL_nodes_delta,RBC_nodes
+matpower/case118,0.03125,-154.84256999999997,-1.0,0.03125,-1.0,-1.0
+matpower/case14,0.03125,-3.136244,-1.0,1.0,0.0,0.0
+matpower/case30,0.03125,-10.821616,-1.0,1.0,0.0,0.0
+matpower/case300,0.6875,75.97151700000006,0.23809523809523808,0.25,73.5,0.8
+matpower/case57,0.03125,-58.09258749999999,-1.0,0.125,-1.0,-1.0
+matpower/case89pegase,0.03125,-98.3265385,-1.0,1.0,0.0,-1.0

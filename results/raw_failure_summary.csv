@@ -1,0 +1,7 @@
+case_folder,raw_runs,raw_time_limit_runs,raw_time_limit_no_incumbent,raw_time_limit_with_incumbent,raw_no_feasible_within_limit,raw_pass,raw_no_feasible_rate
+matpower/case118,6,0,0,0,0,6,0.0
+matpower/case14,6,0,0,0,0,6,0.0
+matpower/case30,6,0,0,0,0,6,0.0
+matpower/case300,6,0,0,0,0,6,0.0
+matpower/case57,6,0,0,0,2,4,0.3333333333333333
+matpower/case89pegase,6,0,0,0,0,6,0.0

@@ -1,0 +1,28 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Downloaded datasets and run outputs
+src/data/
+outputs/
+results/raw_logs/
+results/solutions/
+results/logs/
+results/figures/
+results/tables/
+src/stability_radius/outputs/
+src/scuc_sr/results/
+src/scuc_sr/logs/
+src/scuc_sr/tuning_results/
+catboost_info/
