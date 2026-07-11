@@ -11,6 +11,8 @@ This runbook lists the exact additional experiments and artifacts needed before 
 
 Do not synthesize any missing values. If an item below cannot be produced by the current repository state, record that fact in the artifact manifest and either run the listed instrumentation step or narrow the manuscript claim.
 
+If only 2-3 hours of Gurobi time are available, run Section 1A and treat every larger claim as unconfirmed in the manuscript. The short audit can support a narrow statement about the case57 RAW/LAZY/LAZY+COMMIT behavior and a small no-training smoke test on case14/case30. It cannot support the large-case, repeated-run, fallback, or generator-contingency claims.
+
 ## 1. Checkout and Environment
 
 Use the exact source revision below unless the manuscript is explicitly updated to cite a newer tagged revision.
@@ -66,6 +68,101 @@ Expected fixed paper splits:
 export TEST_DATES="2017-01-15 2017-03-15 2017-05-15 2017-07-15 2017-09-15 2017-11-15"
 export TRAIN_DATES="2017-01-05 2017-01-25 2017-02-05 2017-02-25 2017-03-05 2017-03-25 2017-04-05 2017-04-25 2017-05-05 2017-05-25 2017-06-05 2017-06-25 2017-07-05 2017-07-25 2017-08-05 2017-08-25 2017-09-05 2017-09-25 2017-10-05 2017-10-25 2017-11-05 2017-11-25 2017-12-05 2017-12-25"
 ```
+
+## 1A. Two-to-Three-Hour Minimum Audit
+
+This is the only defensible short run. It is a triage audit, not a replacement for the confirmatory panels below.
+
+Mandatory short run:
+
+- case: `matpower/case57`;
+- TEST dates: all six fixed paper dates;
+- modes: `RAW`, unrestricted `LAZY_ALL`, and `LAZY_COMMIT_HINTS`;
+- expected TEST rows: `1 case x 6 dates x 3 modes = 18`;
+- worst-case solver time from configured limits: `24 train x 180 s + 18 test x 180 s = 7560 s`, or about 2.1 h, plus setup and data download time.
+
+```bash
+export SHORT_RUN_ID=ijse_short_case57_audit_$(date -u +%Y%m%dT%H%M%SZ)
+
+python -m src.paper.experiments \
+  --run-id "$SHORT_RUN_ID" \
+  --profile small \
+  --only-case matpower/case57 \
+  --only-modes RAW LAZY_ALL LAZY_COMMIT_HINTS \
+  --train-dates $TRAIN_DATES \
+  --test-dates $TEST_DATES \
+  --force-rerun
+```
+
+Optional no-training smoke test if there is still about one hour available:
+
+- cases: `matpower/case14`, `matpower/case30`;
+- modes: `RAW`, unrestricted `LAZY_ALL`, and `LAZY_BANDIT`;
+- expected TEST rows: `2 cases x 6 dates x 3 modes = 36`;
+- worst-case solver time from configured limits: about 0.9 h.
+
+```bash
+export SHORT_SMOKE_RUN_ID=ijse_short_smoke_audit_$(date -u +%Y%m%dT%H%M%SZ)
+
+for case in matpower/case14 matpower/case30; do
+  python -m src.paper.experiments \
+    --run-id "$SHORT_SMOKE_RUN_ID" \
+    --resume \
+    --profile small \
+    --only-case "$case" \
+    --only-modes RAW LAZY_ALL LAZY_BANDIT \
+    --train-dates $TRAIN_DATES \
+    --test-dates $TEST_DATES \
+    --force-rerun
+done
+```
+
+Create the short-run summary:
+
+```bash
+python - <<'PY'
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+run_ids = [os.environ.get("SHORT_RUN_ID", ""), os.environ.get("SHORT_SMOKE_RUN_ID", "")]
+frames = []
+for run_id in [x for x in run_ids if x]:
+    path = Path("results") / run_id / "results.csv"
+    if path.exists():
+        df = pd.read_csv(path)
+        df["source_run_id"] = run_id
+        frames.append(df)
+if not frames:
+    raise SystemExit("no short-run result CSV found")
+
+df = pd.concat(frames, ignore_index=True)
+df = df[df["stage"].astype(str).str.upper().eq("TEST")].copy()
+df["runtime"] = pd.to_numeric(df["wall_sec"], errors="coerce")
+df["mip_gap_num"] = pd.to_numeric(df["mip_gap"], errors="coerce")
+df["pass_num"] = pd.to_numeric(df["pass"], errors="coerce").fillna(0).astype(int)
+df["has_incumbent_num"] = pd.to_numeric(df["has_incumbent"], errors="coerce").fillna(0).astype(int)
+
+summary = df.groupby(["case_folder", "mode_id"], dropna=False).agg(
+    rows=("runtime", "size"),
+    incumbents=("has_incumbent_num", "sum"),
+    checker_accepted=("pass_num", "sum"),
+    median_wall_sec=("runtime", "median"),
+    median_gap=("mip_gap_num", "median"),
+    max_residual=("max_constraint_residual", "max"),
+).reset_index()
+
+out = Path("audit_exports") / "short_audit_summary.csv"
+out.parent.mkdir(parents=True, exist_ok=True)
+summary.to_csv(out, index=False)
+print(out)
+print(summary.to_string(index=False))
+PY
+```
+
+Manuscript use rule for this short path: use it only to check whether the existing case57/short-topology conclusions still reproduce on the server. Do not use it to report new large-case statistics, repeated-run uncertainty, end-to-end fallback performance, or generator-contingency coverage.
 
 ## 2. Minimal Dry Run
 
