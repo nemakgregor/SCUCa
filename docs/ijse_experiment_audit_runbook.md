@@ -11,7 +11,7 @@ This runbook lists the exact additional experiments and artifacts needed before 
 
 Do not synthesize any missing values. If an item below cannot be produced by the current repository state, record that fact in the artifact manifest and either run the listed instrumentation step or narrow the manuscript claim.
 
-If only 2-3 hours of Gurobi time are available, run Section 1A and treat every larger claim as unconfirmed in the manuscript. The short audit can support a narrow statement about the case57 RAW/LAZY/LAZY+COMMIT behavior and a small no-training smoke test on case14/case30. It cannot support the large-case, repeated-run, fallback, or generator-contingency claims.
+If only 2-3 hours of Gurobi time are available, run Section 1A only. It targets missing evidence rather than reproducing already available rows. It cannot support new large-case statistics, repeated-run uncertainty, or generator-contingency claims.
 
 ## 1. Checkout and Environment
 
@@ -69,55 +69,52 @@ export TEST_DATES="2017-01-15 2017-03-15 2017-05-15 2017-07-15 2017-09-15 2017-1
 export TRAIN_DATES="2017-01-05 2017-01-25 2017-02-05 2017-02-25 2017-03-05 2017-03-25 2017-04-05 2017-04-25 2017-05-05 2017-05-25 2017-06-05 2017-06-25 2017-07-05 2017-07-25 2017-08-05 2017-08-25 2017-09-05 2017-09-25 2017-10-05 2017-10-25 2017-11-05 2017-11-25 2017-12-05 2017-12-25"
 ```
 
-## 1A. Two-to-Three-Hour Minimum Audit
+## 1A. Two-to-Three-Hour Missing-Only Audit
 
-This is the only defensible short run. It is a triage audit, not a replacement for the confirmatory panels below.
+This short path reruns only rows that are missing or obligatory for the manuscript's failure and fallback discussion. It does not repeat already available rows and is not a replacement for the confirmatory panels below.
 
-Mandatory short run:
+Mandatory failure audit:
 
 - case: `matpower/case57`;
-- TEST dates: all six fixed paper dates;
+- TEST dates: `2017-09-15` and `2017-11-15`, the known unresolved failure dates in the retained ledger;
 - modes: `RAW`, unrestricted `LAZY_ALL`, and `LAZY_COMMIT_HINTS`;
-- expected TEST rows: `1 case x 6 dates x 3 modes = 18`;
-- worst-case solver time from configured limits: `24 train x 180 s + 18 test x 180 s = 7560 s`, or about 2.1 h, plus setup and data download time.
+- expected TEST rows: `1 case x 2 dates x 3 modes = 6`;
+- worst-case solver time from configured limits: `24 train x 180 s + 6 test x 180 s = 5400 s`, or about 1.5 h, plus setup and data download time.
 
 ```bash
-export SHORT_RUN_ID=ijse_short_case57_audit_$(date -u +%Y%m%dT%H%M%SZ)
+export MISSING_RUN_ID=ijse_missing_case57_failure_audit_$(date -u +%Y%m%dT%H%M%SZ)
 
 python -m src.paper.experiments \
-  --run-id "$SHORT_RUN_ID" \
+  --run-id "$MISSING_RUN_ID" \
   --profile small \
   --only-case matpower/case57 \
   --only-modes RAW LAZY_ALL LAZY_COMMIT_HINTS \
   --train-dates $TRAIN_DATES \
-  --test-dates $TEST_DATES \
+  --only-test-instances 2017-09-15 2017-11-15 \
   --force-rerun
 ```
 
-Optional no-training smoke test if there is still about one hour available:
+Mandatory fallback micro-benchmark if the manuscript keeps any checker-and-fallback workflow claim:
 
-- cases: `matpower/case14`, `matpower/case30`;
-- modes: `RAW`, unrestricted `LAZY_ALL`, and `LAZY_BANDIT`;
-- expected TEST rows: `2 cases x 6 dates x 3 modes = 36`;
-- worst-case solver time from configured limits: about 0.9 h.
+- case: `matpower/case300`;
+- TEST date: `2017-01-15`, a retained row where `LAZY_BANDIT` is checker-rejected in the existing ledger;
+- modes: `LAZY_BANDIT` and unrestricted `LAZY_ALL`;
+- expected TEST rows: `1 case x 1 date x 2 modes = 2`;
+- worst-case solver time from configured limits: `2 x 1200 s`, or about 0.7 h.
 
 ```bash
-export SHORT_SMOKE_RUN_ID=ijse_short_smoke_audit_$(date -u +%Y%m%dT%H%M%SZ)
+export FALLBACK_MICRO_RUN_ID=ijse_missing_fallback_micro_$(date -u +%Y%m%dT%H%M%SZ)
 
-for case in matpower/case14 matpower/case30; do
-  python -m src.paper.experiments \
-    --run-id "$SHORT_SMOKE_RUN_ID" \
-    --resume \
-    --profile small \
-    --only-case "$case" \
-    --only-modes RAW LAZY_ALL LAZY_BANDIT \
-    --train-dates $TRAIN_DATES \
-    --test-dates $TEST_DATES \
-    --force-rerun
-done
+python -m src.paper.experiments \
+  --run-id "$FALLBACK_MICRO_RUN_ID" \
+  --profile small \
+  --only-case matpower/case300 \
+  --only-modes LAZY_BANDIT LAZY_ALL \
+  --only-test-instances 2017-01-15 \
+  --force-rerun
 ```
 
-Create the short-run summary:
+Create the missing-only summary:
 
 ```bash
 python - <<'PY'
@@ -127,7 +124,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-run_ids = [os.environ.get("SHORT_RUN_ID", ""), os.environ.get("SHORT_SMOKE_RUN_ID", "")]
+run_ids = [os.environ.get("MISSING_RUN_ID", ""), os.environ.get("FALLBACK_MICRO_RUN_ID", "")]
 frames = []
 for run_id in [x for x in run_ids if x]:
     path = Path("results") / run_id / "results.csv"
@@ -154,7 +151,7 @@ summary = df.groupby(["case_folder", "mode_id"], dropna=False).agg(
     max_residual=("max_constraint_residual", "max"),
 ).reset_index()
 
-out = Path("audit_exports") / "short_audit_summary.csv"
+out = Path("audit_exports") / "missing_only_audit_summary.csv"
 out.parent.mkdir(parents=True, exist_ok=True)
 summary.to_csv(out, index=False)
 print(out)
@@ -162,7 +159,7 @@ print(summary.to_string(index=False))
 PY
 ```
 
-Manuscript use rule for this short path: use it only to check whether the existing case57/short-topology conclusions still reproduce on the server. Do not use it to report new large-case statistics, repeated-run uncertainty, end-to-end fallback performance, or generator-contingency coverage.
+Manuscript use rule for this short path: use the case57 rows to document the RAW/unrestricted-LAZY/LAZY+COMMIT failure dates and use the case300 micro-run only as an illustrative checker-and-fallback timing example. Do not use this path to report new large-case statistics, repeated-run uncertainty, or generator-contingency coverage.
 
 ## 2. Minimal Dry Run
 
