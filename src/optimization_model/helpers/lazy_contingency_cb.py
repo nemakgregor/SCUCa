@@ -32,6 +32,19 @@ class LazyContingencyConfig:
     allowed_monitored_lines: Optional[set] = None
 
 
+def _signed_slack_residuals(
+    post_flow: float,
+    emergency_limit: float,
+    overflow_pos: float,
+    overflow_neg: float,
+) -> Tuple[float, float]:
+    """Return positive/negative residuals for the shared-slack N-1 rows."""
+    return (
+        post_flow - emergency_limit - overflow_pos,
+        -post_flow - emergency_limit - overflow_neg,
+    )
+
+
 def attach_lazy_contingency_callback(
     model: gp.Model, scenario, config: Optional[LazyContingencyConfig] = None
 ) -> None:
@@ -124,12 +137,22 @@ def attach_lazy_contingency_callback(
 
         # Current base-case line flows
         f_val: Dict[Tuple[str, int], float] = {}
+        covp_val: Dict[Tuple[str, int], float] = {}
+        covn_val: Dict[Tuple[str, int], float] = {}
         for ln in lines:
             for t in range(T):
                 try:
                     f_val[(ln.name, t)] = float(m.cbGetSolution(line_flow[ln.name, t]))
                 except Exception:
                     f_val[(ln.name, t)] = 0.0
+                try:
+                    covp_val[(ln.name, t)] = float(m.cbGetSolution(covp[ln.name, t]))
+                except Exception:
+                    covp_val[(ln.name, t)] = 0.0
+                try:
+                    covn_val[(ln.name, t)] = float(m.cbGetSolution(covn[ln.name, t]))
+                except Exception:
+                    covn_val[(ln.name, t)] = 0.0
 
         # Current generator outputs (total power)
         p_val: Dict[Tuple[str, int], float] = {}
@@ -152,7 +175,6 @@ def attach_lazy_contingency_callback(
                 p_val[(gen.name, t)] = base
 
         viols: List[Tuple[float, str, int, object, object, int, float]] = []
-
         # Line-outage contingencies
         for cont in scenario.contingencies or []:
             if not cont.lines:
@@ -181,16 +203,13 @@ def attach_lazy_contingency_callback(
                             + float(alpha) * f_val[(out_line.name, t)]
                         )
                         F_em = float(line_l.emergency_limit[t])
-                        vpos = post - F_em
-                        vneg = -post - F_em
+                        vpos, vneg = _signed_slack_residuals(
+                            post, F_em, covp_val[(line_l.name, t)], covn_val[(line_l.name, t)]
+                        )
                         if vpos > cfg.violation_tol:
-                            viols.append(
-                                (vpos, "line", +1, line_l, out_line, t, float(alpha))
-                            )
+                            viols.append((vpos, "line", +1, line_l, out_line, t, float(alpha)))
                         if vneg > cfg.violation_tol:
-                            viols.append(
-                                (vneg, "line", -1, line_l, out_line, t, float(alpha))
-                            )
+                            viols.append((vneg, "line", -1, line_l, out_line, t, float(alpha)))
 
         # Gen-outage contingencies
         for cont in scenario.contingencies or []:
@@ -209,8 +228,9 @@ def attach_lazy_contingency_callback(
                             for t in range(T):
                                 post = f_val[(line_l.name, t)]
                                 F_em = float(line_l.emergency_limit[t])
-                                vpos = post - F_em
-                                vneg = -post - F_em
+                                vpos, vneg = _signed_slack_residuals(
+                                    post, F_em, covp_val[(line_l.name, t)], covn_val[(line_l.name, t)]
+                                )
                                 if vpos > cfg.violation_tol:
                                     viols.append((vpos, "gen", +1, line_l, gen, t, 0.0))
                                 if vneg > cfg.violation_tol:
@@ -222,8 +242,9 @@ def attach_lazy_contingency_callback(
                             for t in range(T):
                                 post = f_val[(line_l.name, t)]
                                 F_em = float(line_l.emergency_limit[t])
-                                vpos = post - F_em
-                                vneg = -post - F_em
+                                vpos, vneg = _signed_slack_residuals(
+                                    post, F_em, covp_val[(line_l.name, t)], covn_val[(line_l.name, t)]
+                                )
                                 if vpos > cfg.violation_tol:
                                     viols.append((vpos, "gen", +1, line_l, gen, t, 0.0))
                                 if vneg > cfg.violation_tol:
@@ -245,8 +266,9 @@ def attach_lazy_contingency_callback(
                         for t in range(T):
                             post = f_val[(line_l.name, t)] - beta * p_val[(gen.name, t)]
                             F_em = float(line_l.emergency_limit[t])
-                            vpos = post - F_em
-                            vneg = -post - F_em
+                            vpos, vneg = _signed_slack_residuals(
+                                post, F_em, covp_val[(line_l.name, t)], covn_val[(line_l.name, t)]
+                            )
                             if vpos > cfg.violation_tol:
                                 viols.append((vpos, "gen", +1, line_l, gen, t, beta))
                             if vneg > cfg.violation_tol:

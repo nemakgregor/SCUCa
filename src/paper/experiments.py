@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import os
@@ -373,14 +374,14 @@ def _default_state(run_id: str, medlarge_mode_ids: Optional[Sequence[str]] = Non
 def _load_completed_keys_from_csv(csv_path: Path) -> Set[str]:
     if not csv_path.exists():
         return set()
-    completed: Set[str] = set()
+    latest_status: Dict[str, str] = {}
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         for row in csv.DictReader(fh):
             key = (row.get("result_key") or "").strip()
             status = (row.get("status") or "").strip().upper()
-            if key and status != "ERROR":
-                completed.add(key)
-    return completed
+            if key:
+                latest_status[key] = status
+    return {key for key, status in latest_status.items() if status != "ERROR"}
 
 
 def _load_result_lookup(csv_path: Path) -> Dict[str, Dict]:
@@ -439,17 +440,19 @@ def _logical_result_key(stage: str, mode_id: str, instance_name: str) -> str:
 def _load_completed_result_lookup_by_logical_key(csv_path: Path) -> Dict[str, Dict]:
     if not csv_path.exists():
         return {}
-    lookup: Dict[str, Dict] = {}
+    latest: Dict[str, Dict] = {}
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         for row in csv.DictReader(fh):
-            if str(row.get("status") or "").strip().upper() == "ERROR":
-                continue
             stage = str(row.get("stage") or "").strip()
             mode_id = str(row.get("mode_id") or "").strip()
             instance_name = str(row.get("instance_name") or "").strip()
             if stage and mode_id and instance_name:
-                lookup[_logical_result_key(stage, mode_id, instance_name)] = row
-    return lookup
+                latest[_logical_result_key(stage, mode_id, instance_name)] = row
+    return {
+        key: row
+        for key, row in latest.items()
+        if str(row.get("status") or "").strip().upper() != "ERROR"
+    }
 
 
 def _instances_from_dates(case_folder: str, dates_or_names: Sequence[str]) -> List[str]:
@@ -908,15 +911,21 @@ def _build_model_for_mode(mode: ModeSpec, scenario, scenario_model, st_keep_mask
         contingency_filter = combined if rc_pred or gnn_pred else None
     elif mode.mode_family == "WARM_LPSCREEN":
         contingency_filter = combined if lp_pred or gnn_pred else None
-    model = build_model(
-        scenario=scenario_model,
-        contingency_filter=None if (omit_explicit or mode.mode_family == "WARM_SR_LAZY") else contingency_filter,
-        contingency_keep_masks=st_keep_masks,
-        use_lazy_contingencies=bool(omit_explicit),
-        radius_line_whitelist=monitored_line_whitelist,
-    )
-    model.update()
-    return model
+    model = None
+    try:
+        model = build_model(
+            scenario=scenario_model,
+            contingency_filter=None if (omit_explicit or mode.mode_family == "WARM_SR_LAZY") else contingency_filter,
+            contingency_keep_masks=st_keep_masks,
+            use_lazy_contingencies=bool(omit_explicit),
+            radius_line_whitelist=monitored_line_whitelist,
+        )
+        model.update()
+        return model
+    except Exception:
+        if model is not None:
+            _dispose_model_quietly(model)
+        raise
 
 
 def _apply_training_artifacts(mode: ModeSpec, model, scenario, scenario_model, instance_name: str, case_artifacts: CaseArtifacts) -> Tuple[int, int]:
@@ -960,6 +969,10 @@ def _set_solver_params(model, mode: ModeSpec, *, gurobi_log_path: Optional[Path]
     model.Params.NumericFocus = 1
     model.Params.MIPGap = float(mode.mip_gap)
     model.Params.TimeLimit = float(mode.time_limit_sec)
+    if os.environ.get("GUROBI_SEED"):
+        model.Params.Seed = int(os.environ["GUROBI_SEED"])
+    if os.environ.get("GUROBI_THREADS"):
+        model.Params.Threads = int(os.environ["GUROBI_THREADS"])
     no_rel_heur_time = _resolve_no_rel_heur_time(mode)
     if no_rel_heur_time > 0.0:
         model.Params.NoRelHeurTime = float(no_rel_heur_time)
@@ -1050,53 +1063,65 @@ def _solve_payload(instance_name: str, mode: ModeSpec, case_artifacts: CaseArtif
             shrink_overlap=int(getattr(report, "overlap", mode.shrink_overlap) or 0), fixed_commit_vars=0, fixed_commit_on=0, fixed_commit_off=0, st_kept_line_pairs=0, st_kept_gen_pairs=0,
         )
     model = _build_model_for_mode(mode, scenario, scenario_model, st_keep_masks, monitored_line_whitelist, rc_pred, lp_pred, gnn_pred)
-    num_vars_root = int(getattr(model, "NumVars", 0) or 0)
-    num_constrs_root = int(getattr(model, "NumConstrs", 0) or 0)
-    _skip_large_model_if_needed(
-        mode=mode,
-        case_folder=case_artifacts.case_folder,
-        stage=stage,
-        model=model,
-        screen_setup_sec=screen_setup_sec,
-        screen_monitored_lines=screen_monitored_lines,
-    )
-    warm_start_applied, branch_hints_applied = _apply_training_artifacts(mode, model, scenario, scenario_model, instance_name, case_artifacts)
-    _attach_lazy_if_needed(mode, model, scenario_model, rc_keep_masks, lp_keep_masks, gnn_keep_masks)
-    _set_solver_params(model, mode, gurobi_log_path=None if paths is None else _gurobi_log_path(paths, stage, mode, instance_name))
+    try:
+        num_vars_root = int(getattr(model, "NumVars", 0) or 0)
+        num_constrs_root = int(getattr(model, "NumConstrs", 0) or 0)
+        _skip_large_model_if_needed(
+            mode=mode,
+            case_folder=case_artifacts.case_folder,
+            stage=stage,
+            model=model,
+            screen_setup_sec=screen_setup_sec,
+            screen_monitored_lines=screen_monitored_lines,
+        )
+        warm_start_applied, branch_hints_applied = _apply_training_artifacts(mode, model, scenario, scenario_model, instance_name, case_artifacts)
+        _attach_lazy_if_needed(mode, model, scenario_model, rc_keep_masks, lp_keep_masks, gnn_keep_masks)
+        _set_solver_params(model, mode, gurobi_log_path=None if paths is None else _gurobi_log_path(paths, stage, mode, instance_name))
+    except Exception:
+        _dispose_model_quietly(model)
+        raise
     active_set_iters = 0
     active_set_added = 0
     active_set_dropped = 0
-    if mode.mode_family in {"ACTIVESET", "ACTIVESET_LAZY"}:
-        report = optimize_with_active_set(model, scenario, ActiveSetConfig(
-            time_limit=int(mode.time_limit_sec), mip_gap=float(mode.mip_gap), lodf_tol=float(mode.lazy_lodf_tol), isf_tol=float(mode.lazy_isf_tol),
-            violation_tol=float(mode.lazy_viol_tol), batch_size=int(mode.active_set_batch), max_rounds=int(mode.active_set_max_rounds),
-            cleanup_inactive=bool(mode.active_set_cleanup), cleanup_tol=float(mode.active_set_cleanup_tol),
-            no_rel_heur_time=float(_resolve_no_rel_heur_time(mode)), output_flag=1,
-        ))
-        active_set_iters = int(getattr(report, "iterations", 0) or 0)
-        active_set_added = int(getattr(report, "added_constraints", 0) or 0)
-        active_set_dropped = int(getattr(report, "dropped_constraints", 0) or 0)
-        model._paper_runtime_sec = float(getattr(report, "total_runtime", 0.0) or 0.0)
-    else:
-        callback = getattr(model, "_lazy_contingency_callback", None)
-        model.optimize() if callback is None else model.optimize(callback)
-    constr_total_cont = None
-    constr_kept_cont = None
-    constr_ratio_cont_explicit = None
-    if mode.mode_family in {"WARM_PRUNE","WARM_LPSCREEN","WARM_PRUNE_LAZY","WARM_LPSCREEN_LAZY","WARM_SR_LAZY","STREDUCE","STREDUCE_LAZY"} or gnn_keep_masks is not None:
-        estimate_pred = rc_pred if mode.mode_family == "WARM_PRUNE" else lp_pred if mode.mode_family == "WARM_LPSCREEN" else None
-        estimate_masks = rc_keep_masks if mode.mode_family == "WARM_PRUNE_LAZY" else lp_keep_masks if mode.mode_family == "WARM_LPSCREEN_LAZY" else st_keep_masks if mode.mode_family in {"STREDUCE","STREDUCE_LAZY"} else gnn_keep_masks
-        constr_total_cont, constr_kept_cont = _estimate_cont_counts(scenario, estimate_pred, estimate_masks, monitored_line_whitelist)
-        constr_ratio_cont_explicit = None if not constr_total_cont else float(constr_kept_cont) / float(constr_total_cont)
-    return SolvePayload(
-        scenario=scenario, model=model, screen_setup_sec=screen_setup_sec, num_vars_root=num_vars_root, num_constrs_root=num_constrs_root,
-        warm_start_applied_vars=warm_start_applied, branch_hints_applied=branch_hints_applied, constr_total_cont=constr_total_cont, constr_kept_cont=constr_kept_cont,
-        constr_ratio_cont_explicit=constr_ratio_cont_explicit, screen_monitored_lines=screen_monitored_lines, active_set_iters=active_set_iters,
-        active_set_added=active_set_added, active_set_dropped=active_set_dropped, shrink_window_count=0, shrink_window_size=0, shrink_overlap=0,
-        fixed_commit_vars=int(getattr(st_profile, "fixed_commit_vars", 0) or 0), fixed_commit_on=int(getattr(st_profile, "fixed_commit_on", 0) or 0),
-        fixed_commit_off=int(getattr(st_profile, "fixed_commit_off", 0) or 0), st_kept_line_pairs=int(getattr(st_profile, "kept_line_pairs", 0) or 0),
-        st_kept_gen_pairs=int(getattr(st_profile, "kept_gen_pairs", 0) or 0),
-    )
+    try:
+        if mode.mode_family in {"ACTIVESET", "ACTIVESET_LAZY"}:
+            report = optimize_with_active_set(model, scenario, ActiveSetConfig(
+                time_limit=int(mode.time_limit_sec), mip_gap=float(mode.mip_gap), lodf_tol=float(mode.lazy_lodf_tol), isf_tol=float(mode.lazy_isf_tol),
+                violation_tol=float(mode.lazy_viol_tol), batch_size=int(mode.active_set_batch), max_rounds=int(mode.active_set_max_rounds),
+                cleanup_inactive=bool(mode.active_set_cleanup), cleanup_tol=float(mode.active_set_cleanup_tol),
+                no_rel_heur_time=float(_resolve_no_rel_heur_time(mode)), output_flag=1,
+            ))
+            active_set_iters = int(getattr(report, "iterations", 0) or 0)
+            active_set_added = int(getattr(report, "added_constraints", 0) or 0)
+            active_set_dropped = int(getattr(report, "dropped_constraints", 0) or 0)
+            model._paper_runtime_sec = float(getattr(report, "total_runtime", 0.0) or 0.0)
+        else:
+            callback = getattr(model, "_lazy_contingency_callback", None)
+            model.optimize() if callback is None else model.optimize(callback)
+    except Exception:
+        _dispose_model_quietly(model)
+        raise
+    try:
+        constr_total_cont = None
+        constr_kept_cont = None
+        constr_ratio_cont_explicit = None
+        if mode.mode_family in {"WARM_PRUNE","WARM_LPSCREEN","WARM_PRUNE_LAZY","WARM_LPSCREEN_LAZY","WARM_SR_LAZY","STREDUCE","STREDUCE_LAZY"} or gnn_keep_masks is not None:
+            estimate_pred = rc_pred if mode.mode_family == "WARM_PRUNE" else lp_pred if mode.mode_family == "WARM_LPSCREEN" else None
+            estimate_masks = rc_keep_masks if mode.mode_family == "WARM_PRUNE_LAZY" else lp_keep_masks if mode.mode_family == "WARM_LPSCREEN_LAZY" else st_keep_masks if mode.mode_family in {"STREDUCE","STREDUCE_LAZY"} else gnn_keep_masks
+            constr_total_cont, constr_kept_cont = _estimate_cont_counts(scenario, estimate_pred, estimate_masks, monitored_line_whitelist)
+            constr_ratio_cont_explicit = None if not constr_total_cont else float(constr_kept_cont) / float(constr_total_cont)
+        return SolvePayload(
+            scenario=scenario, model=model, screen_setup_sec=screen_setup_sec, num_vars_root=num_vars_root, num_constrs_root=num_constrs_root,
+            warm_start_applied_vars=warm_start_applied, branch_hints_applied=branch_hints_applied, constr_total_cont=constr_total_cont, constr_kept_cont=constr_kept_cont,
+            constr_ratio_cont_explicit=constr_ratio_cont_explicit, screen_monitored_lines=screen_monitored_lines, active_set_iters=active_set_iters,
+            active_set_added=active_set_added, active_set_dropped=active_set_dropped, shrink_window_count=0, shrink_window_size=0, shrink_overlap=0,
+            fixed_commit_vars=int(getattr(st_profile, "fixed_commit_vars", 0) or 0), fixed_commit_on=int(getattr(st_profile, "fixed_commit_on", 0) or 0),
+            fixed_commit_off=int(getattr(st_profile, "fixed_commit_off", 0) or 0), st_kept_line_pairs=int(getattr(st_profile, "kept_line_pairs", 0) or 0),
+            st_kept_gen_pairs=int(getattr(st_profile, "kept_gen_pairs", 0) or 0),
+        )
+    except Exception:
+        _dispose_model_quietly(model)
+        raise
 
 
 def _save_candidate_solution(paths: RunPaths, stage: str, mode: ModeSpec, instance_name: str, payload: SolvePayload) -> Optional[Path]:
@@ -1113,6 +1138,7 @@ def _save_train_solution(paths: RunPaths, instance_name: str, payload: SolvePayl
 
 def _run_single_solve(*, run_id: str, stage: str, instance_name: str, mode: ModeSpec, case_artifacts: CaseArtifacts, paths: RunPaths) -> Dict:
     started_at = time.time()
+    payload: Optional[SolvePayload] = None
     _mark_solve_started(
         paths=paths,
         run_id=run_id,
@@ -1127,7 +1153,6 @@ def _run_single_solve(*, run_id: str, stage: str, instance_name: str, mode: Mode
         provisional = _build_success_row(run_id=run_id, stage=stage, case_folder=case_artifacts.case_folder, instance_name=instance_name, mode=mode, started_at=started_at, payload=payload, candidate_solution_json=candidate_solution_json, train_solution_json=None)
         train_solution_json = _save_train_solution(paths, instance_name, payload) if _is_train_artifact_eligible(provisional) else None
         row = _build_success_row(run_id=run_id, stage=stage, case_folder=case_artifacts.case_folder, instance_name=instance_name, mode=mode, started_at=started_at, payload=payload, candidate_solution_json=candidate_solution_json, train_solution_json=train_solution_json)
-        payload.model.dispose()
         return row
     except SkipSolve as exc:
         logger.warning(
@@ -1152,6 +1177,10 @@ def _run_single_solve(*, run_id: str, stage: str, instance_name: str, mode: Mode
     except Exception as exc:
         logger.exception("Solve failed: stage=%s case=%s instance=%s mode=%s", stage, case_artifacts.case_folder, instance_name, mode.mode_id)
         return _make_error_row(run_id=run_id, stage=stage, case_folder=case_artifacts.case_folder, instance_name=instance_name, mode=mode, started_at=started_at, error_message=str(exc))
+    finally:
+        if payload is not None:
+            _dispose_model_quietly(payload.model)
+        gc.collect()
 
 
 def _record_row(paths: RunPaths, state: Dict, row: Dict) -> None:
@@ -1434,9 +1463,10 @@ def _run_case(
     try:
         if not needs_artifacts:
             artifacts = _bootstrap_case_artifacts(case_folder)
-        elif case_folder in set(state.get("artifacts_built_cases", [])):
-            artifacts = _build_case_artifacts(case_folder, _successful_train_names_for_case(paths, case_folder))
         else:
+            # Always pass through the resume-aware TRAIN stage. It skips the
+            # latest successful logical cells but retries missing/ERROR cells;
+            # an old artifacts_built_cases marker must not hide such holes.
             artifacts = _run_train_stage(
                 run_id=run_id,
                 case_folder=case_folder,
